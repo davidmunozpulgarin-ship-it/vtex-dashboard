@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, date, timedelta
-from vtex_api import fetch_orders, parse_orders, MP_SUFFIX, fetch_inventory
+from datetime import date, timedelta
+from vtex_api import fetch_orders, parse_orders, MP_SUFFIX, fetch_inventory, STATUS_LABEL
 
 st.set_page_config(
     page_title="Control Comercial VTEX",
@@ -31,6 +31,8 @@ div[data-testid="stPlotlyChart"] { border-radius: 12px; overflow: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
+COLORS = ["#FF3560","#4f87ff","#22c77a","#f5a524","#a78bfa","#34d399","#eab308","#f03e3e","#fb923c","#c084fc"]
+
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🛍️ VTEX Control")
@@ -38,14 +40,15 @@ with st.sidebar:
     st.divider()
 
     st.markdown("#### 📅 Rango de fechas")
+    hoy = date.today()
+
     preset = st.selectbox(
         "Período rápido",
-        ["Personalizado", "Hoy", "Últimos 7 días", "Últimos 15 días",
-         "Últimos 30 días", "Este mes", "Mes anterior", "Últimos 90 días"],
-        index=4,
+        ["Hoy", "Últimos 7 días", "Últimos 15 días", "Últimos 30 días",
+         "Este mes", "Mes anterior", "Personalizado"],
+        index=0,
     )
 
-    hoy = date.today()
     if preset == "Hoy":
         default_from, default_to = hoy, hoy
     elif preset == "Últimos 7 días":
@@ -55,15 +58,11 @@ with st.sidebar:
     elif preset == "Últimos 30 días":
         default_from, default_to = hoy - timedelta(days=29), hoy
     elif preset == "Este mes":
-        default_from = hoy.replace(day=1)
-        default_to   = hoy
+        default_from, default_to = hoy.replace(day=1), hoy
     elif preset == "Mes anterior":
-        primer_dia_mes = hoy.replace(day=1)
-        ultimo_mes     = primer_dia_mes - timedelta(days=1)
-        default_from   = ultimo_mes.replace(day=1)
-        default_to     = ultimo_mes
-    elif preset == "Últimos 90 días":
-        default_from, default_to = hoy - timedelta(days=89), hoy
+        primer = hoy.replace(day=1)
+        ultimo = primer - timedelta(days=1)
+        default_from, default_to = ultimo.replace(day=1), ultimo
     else:
         default_from, default_to = hoy - timedelta(days=29), hoy
 
@@ -71,27 +70,43 @@ with st.sidebar:
     fecha_hasta = st.date_input("Hasta", value=default_to,   max_value=hoy)
 
     if fecha_desde > fecha_hasta:
-        st.error("La fecha 'Desde' no puede ser mayor que 'Hasta'.")
+        st.error("'Desde' no puede ser mayor que 'Hasta'.")
         st.stop()
 
     st.divider()
     st.markdown("#### 🏪 Marketplace")
     mp_opciones = ["Todos"] + sorted(MP_SUFFIX.values())
-    mp_sel = st.selectbox("Filtrar por canal", mp_opciones)
+    mp_sel = st.selectbox("Canal", mp_opciones)
+
+    st.markdown("#### 📋 Estado")
+    estados_disp  = list(STATUS_LABEL.values())
+    estados_sel   = st.multiselect(
+        "Filtrar estado",
+        options=estados_disp,
+        default=estados_disp,
+    )
 
     st.divider()
     actualizar = st.button("🔄 Actualizar datos", use_container_width=True, type="primary")
-    st.caption(f"Cuenta: **{st.secrets.get('VTEX_ACCOUNT', '—')}**")
+    st.caption(f"Cuenta: **{st.secrets.get('VTEX_ACCOUNT','—')}**")
     st.caption("🟢 API conectada")
+    st.divider()
+    st.markdown(
+        "**Estados consultados:**\n"
+        "- ✅ Facturado\n"
+        "- 📦 Listo para preparación\n"
+        "- 🔧 Preparando\n"
+        "- 💳 Pago aprobado"
+    )
 
-# ── CARGA DE DATOS ────────────────────────────────────────────────────────────
+# ── CARGA ─────────────────────────────────────────────────────────────────────
 fecha_desde_str = fecha_desde.strftime("%Y-%m-%d")
 fecha_hasta_str = fecha_hasta.strftime("%Y-%m-%d")
 cache_key       = f"{fecha_desde_str}_{fecha_hasta_str}"
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def cargar_datos(key, f_desde, f_hasta):
-    with st.spinner(f"📡 Consultando VTEX ({f_desde} → {f_hasta})..."):
+    with st.spinner(f"📡 Consultando VTEX: {f_desde} → {f_hasta} (solo marketplaces)..."):
         raw    = fetch_orders(f_desde, f_hasta)
         parsed = parse_orders(raw)
     if not parsed:
@@ -108,14 +123,25 @@ df_full = cargar_datos(cache_key, fecha_desde_str, fecha_hasta_str)
 
 if df_full.empty:
     st.markdown("## 🛍️ VTEX Control Comercial")
-    st.warning("⚠️ No se encontraron órdenes para el rango seleccionado. Ajusta las fechas en el panel izquierdo.")
+    st.warning(
+        f"No se encontraron pedidos de marketplace entre "
+        f"**{fecha_desde_str}** y **{fecha_hasta_str}**.\n\n"
+        "Verifica que existan órdenes con los sufijos: "
+        "DFT · GVL · VPC · DDD · FFF · MLB · MPX · FLB · PLT"
+    )
     st.stop()
 
-# ── FILTRO MARKETPLACE ────────────────────────────────────────────────────────
-df = df_full.copy() if mp_sel == "Todos" else df_full[df_full["marketplace"] == mp_sel].copy()
+# ── FILTROS ────────────────────────────────────────────────────────────────────
+df = df_full.copy()
+
+if mp_sel != "Todos":
+    df = df[df["marketplace"] == mp_sel]
+
+if estados_sel:
+    df = df[df["status"].isin(estados_sel)]
 
 if df.empty:
-    st.info(f"Sin órdenes para **{mp_sel}** en el período seleccionado.")
+    st.info(f"Sin órdenes para los filtros seleccionados.")
     st.stop()
 
 dias_rango = (fecha_hasta - fecha_desde).days + 1
@@ -125,7 +151,7 @@ titulo     = "Todos los Marketplaces" if mp_sel == "Todos" else mp_sel
 st.markdown(f"## {titulo}")
 st.caption(
     f"{fecha_desde.strftime('%d/%m/%Y')} → {fecha_hasta.strftime('%d/%m/%Y')} · "
-    f"**{len(df):,}** órdenes · {dias_rango} días"
+    f"**{len(df):,}** pedidos de marketplace · {dias_rango} día(s)"
 )
 st.divider()
 
@@ -148,23 +174,64 @@ c6.metric("📈 GMV / Día",       f"${gmv_dia:,.0f}")
 
 st.divider()
 
-# ── MÓDULO 1: VENTAS Y DESCUENTOS ────────────────────────────────────────────
-st.markdown("### 📊 Ventas y Descuentos")
+# ── PEDIDOS POR ESTADO ────────────────────────────────────────────────────────
+st.markdown("### 📋 Pedidos por Estado")
+est_counts = df.groupby("status").agg(
+    Pedidos=("order_id", "count"),
+    GMV=("gmv", "sum"),
+).reset_index().sort_values("Pedidos", ascending=False)
 
-COLORS = ["#FF3560","#4f87ff","#22c77a","#f5a524","#a78bfa","#34d399","#eab308","#f03e3e","#fb923c","#c084fc"]
+col_e1, col_e2 = st.columns(2)
+with col_e1:
+    fig_est = px.bar(
+        est_counts, x="status", y="Pedidos",
+        color="status",
+        color_discrete_sequence=COLORS,
+        title="Pedidos por estado",
+        labels={"status": "", "Pedidos": "Cantidad"},
+        text="Pedidos",
+    )
+    fig_est.update_traces(textposition="outside")
+    fig_est.update_layout(
+        paper_bgcolor="#171b26", plot_bgcolor="#171b26",
+        font_color="#8b90a7", showlegend=False,
+        title_font_color="#e8eaf2", height=320,
+    )
+    st.plotly_chart(fig_est, use_container_width=True)
+
+with col_e2:
+    fig_est_gmv = px.pie(
+        est_counts, values="GMV", names="status",
+        title="GMV por estado",
+        color_discrete_sequence=COLORS,
+        hole=0.5,
+    )
+    fig_est_gmv.update_layout(
+        paper_bgcolor="#171b26", font_color="#8b90a7",
+        title_font_color="#e8eaf2", height=320,
+        legend=dict(bgcolor="#171b26", font=dict(color="#8b90a7")),
+    )
+    st.plotly_chart(fig_est_gmv, use_container_width=True)
+
+st.divider()
+
+# ── VENTAS Y DESCUENTOS ───────────────────────────────────────────────────────
+st.markdown("### 📊 Ventas y Descuentos por Marketplace")
+
+gmv_mp = df.groupby("marketplace").agg(
+    GMV=("gmv", "sum"),
+    Pedidos=("order_id", "count"),
+    Descuentos=("discount", "sum"),
+    Unidades=("units", "sum"),
+).reset_index().sort_values("GMV", ascending=False)
+gmv_mp["Ticket"] = (gmv_mp["GMV"] / gmv_mp["Pedidos"]).round(0)
+gmv_mp["PctDesc"] = (gmv_mp["Descuentos"] / gmv_mp["GMV"] * 100).round(1)
 
 col1, col2 = st.columns(2)
-
 with col1:
-    gmv_mp = df_full.groupby("marketplace").agg(
-        GMV=("gmv", "sum"),
-        Pedidos=("order_id", "count")
-    ).reset_index().sort_values("GMV", ascending=False)
-
     fig_gmv = px.bar(
         gmv_mp, x="marketplace", y="GMV",
-        color="marketplace",
-        color_discrete_sequence=COLORS,
+        color="marketplace", color_discrete_sequence=COLORS,
         title="GMV por Marketplace",
         labels={"GMV": "GMV ($)", "marketplace": ""},
         text=gmv_mp["GMV"].apply(lambda v: f"${v/1e6:.1f}M" if v >= 1e6 else f"${v/1e3:.0f}K"),
@@ -173,93 +240,95 @@ with col1:
     fig_gmv.update_layout(
         paper_bgcolor="#171b26", plot_bgcolor="#171b26",
         font_color="#8b90a7", showlegend=False,
-        title_font_color="#e8eaf2", height=350,
+        title_font_color="#e8eaf2", height=340,
     )
     st.plotly_chart(fig_gmv, use_container_width=True)
 
 with col2:
-    desc_mp = df_full.groupby("marketplace").agg(
-        Descuento=("discount", "sum"),
-        GMV=("gmv", "sum")
-    ).reset_index()
-    desc_mp["Pct"] = desc_mp.apply(
-        lambda r: r["Descuento"] / r["GMV"] * 100 if r["GMV"] > 0 else 0, axis=1
+    fig_ped = px.bar(
+        gmv_mp, x="marketplace", y="Pedidos",
+        color="marketplace", color_discrete_sequence=COLORS,
+        title="Pedidos por Marketplace",
+        labels={"Pedidos": "Cantidad", "marketplace": ""},
+        text="Pedidos",
     )
-    desc_mp = desc_mp.sort_values("Pct", ascending=True)
-
-    fig_desc = px.bar(
-        desc_mp, x="Pct", y="marketplace", orientation="h",
-        title="Descuento como % del GMV",
-        color="Pct", color_continuous_scale="RdYlGn_r",
-        labels={"Pct": "% Descuento", "marketplace": ""},
-        text=desc_mp["Pct"].apply(lambda v: f"{v:.1f}%"),
-    )
-    fig_desc.update_traces(textposition="outside")
-    fig_desc.update_layout(
+    fig_ped.update_traces(textposition="outside")
+    fig_ped.update_layout(
         paper_bgcolor="#171b26", plot_bgcolor="#171b26",
         font_color="#8b90a7", showlegend=False,
-        title_font_color="#e8eaf2", height=350,
-        coloraxis_showscale=False,
+        title_font_color="#e8eaf2", height=340,
     )
-    st.plotly_chart(fig_desc, use_container_width=True)
+    st.plotly_chart(fig_ped, use_container_width=True)
 
-# Tendencia diaria
+# Descuentos
+desc_mp = gmv_mp.sort_values("PctDesc", ascending=True)
+fig_desc = px.bar(
+    desc_mp, x="PctDesc", y="marketplace", orientation="h",
+    color="PctDesc", color_continuous_scale="RdYlGn_r",
+    title="Descuento como % del GMV por Canal",
+    labels={"PctDesc": "% Descuento", "marketplace": ""},
+    text=desc_mp["PctDesc"].apply(lambda v: f"{v:.1f}%"),
+)
+fig_desc.update_traces(textposition="outside")
+fig_desc.update_layout(
+    paper_bgcolor="#171b26", plot_bgcolor="#171b26",
+    font_color="#8b90a7", showlegend=False,
+    title_font_color="#e8eaf2", height=320, coloraxis_showscale=False,
+)
+st.plotly_chart(fig_desc, use_container_width=True)
+
+# Tabla resumen
+st.markdown("##### Resumen por Marketplace")
+tabla_res = gmv_mp.copy()
+tabla_res["GMV"]       = tabla_res["GMV"].apply(lambda v: f"${v:,.0f}")
+tabla_res["Descuentos"]= tabla_res["Descuentos"].apply(lambda v: f"${v:,.0f}")
+tabla_res["Ticket"]    = tabla_res["Ticket"].apply(lambda v: f"${v:,.0f}")
+tabla_res["PctDesc"]   = tabla_res["PctDesc"].apply(lambda v: f"{v}%")
+st.dataframe(
+    tabla_res.rename(columns={
+        "marketplace":"Marketplace","PctDesc":"% Desc.","Ticket":"Ticket Prom."
+    })[["Marketplace","GMV","Pedidos","Descuentos","Ticket Prom.","Unidades","% Desc."]],
+    use_container_width=True, hide_index=True,
+)
+
+st.divider()
+
+# ── TENDENCIA DIARIA ──────────────────────────────────────────────────────────
+st.markdown("### 📈 Tendencia Diaria")
 tend = df.groupby("fecha").agg(
-    Pedidos=("order_id", "count"),
-    GMV=("gmv", "sum"),
-    Descuentos=("discount", "sum"),
+    Pedidos=("order_id","count"),
+    GMV=("gmv","sum"),
+    Descuentos=("discount","sum"),
 ).reset_index()
 tend["fecha"] = pd.to_datetime(tend["fecha"])
 
 fig_tend = go.Figure()
 fig_tend.add_trace(go.Scatter(
-    x=tend["fecha"], y=tend["GMV"],
-    mode="lines", name="GMV",
+    x=tend["fecha"], y=tend["GMV"], mode="lines", name="GMV",
     line=dict(color="#FF3560", width=2),
     fill="tozeroy", fillcolor="rgba(255,53,96,0.08)",
 ))
 fig_tend.add_trace(go.Scatter(
-    x=tend["fecha"], y=tend["Descuentos"],
-    mode="lines", name="Descuentos",
-    line=dict(color="#f5a524", width=2, dash="dot"),
+    x=tend["fecha"], y=tend["Pedidos"], mode="lines", name="Pedidos",
+    line=dict(color="#4f87ff", width=2), yaxis="y2",
 ))
 fig_tend.update_layout(
-    title=f"Tendencia diaria — {titulo}",
+    title=f"GMV y Pedidos diarios — {titulo}",
     paper_bgcolor="#171b26", plot_bgcolor="#171b26",
     font_color="#8b90a7", title_font_color="#e8eaf2",
     legend=dict(bgcolor="#171b26", font=dict(color="#8b90a7")),
     xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-    yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-    height=300,
+    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="GMV ($)"),
+    yaxis2=dict(overlaying="y", side="right", title="Pedidos", showgrid=False),
+    height=320,
 )
 st.plotly_chart(fig_tend, use_container_width=True)
 
-# Tabla resumen por marketplace
-if mp_sel == "Todos":
-    st.markdown("##### Resumen por Marketplace")
-    resumen = df_full.groupby("marketplace").agg(
-        GMV=("gmv", "sum"),
-        Pedidos=("order_id", "count"),
-        Descuentos=("discount", "sum"),
-        Unidades=("units", "sum"),
-    ).reset_index().sort_values("GMV", ascending=False)
-    resumen["Ticket Prom."] = (resumen["GMV"] / resumen["Pedidos"]).round(0)
-    resumen["% Desc."]      = (resumen["Descuentos"] / resumen["GMV"] * 100).round(1)
-    resumen["GMV"]          = resumen["GMV"].apply(lambda v: f"${v:,.0f}")
-    resumen["Descuentos"]   = resumen["Descuentos"].apply(lambda v: f"${v:,.0f}")
-    resumen["Ticket Prom."] = resumen["Ticket Prom."].apply(lambda v: f"${v:,.0f}")
-    resumen["% Desc."]      = resumen["% Desc."].apply(lambda v: f"{v}%")
-    st.dataframe(
-        resumen.rename(columns={"marketplace": "Marketplace"}),
-        use_container_width=True, hide_index=True,
-    )
-
 st.divider()
 
-# ── MÓDULO 2: INVENTARIO ──────────────────────────────────────────────────────
-st.markdown("### 📦 Disponibilidad de Inventario")
-
-all_skus = []
+# ── INVENTARIO ────────────────────────────────────────────────────────────────
+st.markdown("### 📦 Inventario")
+all_skus    = []
 for row in df["sku_ids"]:
     if isinstance(row, list):
         all_skus.extend(row)
@@ -267,7 +336,7 @@ skus_unicos = [s for s in list(set(all_skus)) if s][:50]
 
 if skus_unicos:
     if st.button(f"🔍 Consultar inventario ({len(skus_unicos)} SKUs)", type="secondary"):
-        with st.spinner("Consultando Logistics API de VTEX..."):
+        with st.spinner("Consultando Logistics API..."):
             inv_data = [fetch_inventory(s) for s in skus_unicos]
         df_inv = pd.DataFrame(inv_data)
         df_inv["Estado"] = df_inv["available"].apply(
@@ -276,22 +345,20 @@ if skus_unicos:
         i1, i2, i3 = st.columns(3)
         criticos = len(df_inv[df_inv["available"] <= 0])
         bajos    = len(df_inv[(df_inv["available"] > 0) & (df_inv["available"] < 10)])
-        ok       = len(df_inv) - criticos - bajos
         i1.metric("🔴 Sin stock",  criticos)
         i2.metric("🟡 Stock bajo", bajos)
-        i3.metric("🟢 Stock OK",   ok)
+        i3.metric("🟢 Stock OK",   len(df_inv) - criticos - bajos)
         st.dataframe(
-            df_inv.rename(columns={"sku_id": "SKU", "available": "Stock disponible"}),
+            df_inv.rename(columns={"sku_id":"SKU","available":"Stock disponible"}),
             use_container_width=True, hide_index=True,
         )
 else:
-    st.info("No se encontraron SKUs en las órdenes del período seleccionado.")
+    st.info("No se encontraron SKUs en las órdenes del período.")
 
 st.divider()
 
-# ── MÓDULO 3: PRODUCTOS ───────────────────────────────────────────────────────
-st.markdown("### 🏆 Rendimiento de Productos")
-
+# ── TOP PRODUCTOS ─────────────────────────────────────────────────────────────
+st.markdown("### 🏆 Top Productos")
 item_rows = []
 for _, row in df.iterrows():
     if isinstance(row.get("items"), list):
@@ -301,7 +368,6 @@ for _, row in df.iterrows():
 
 if item_rows:
     df_items = pd.DataFrame(item_rows)
-
     col1, col2 = st.columns(2)
     with col1:
         top_u = (
@@ -313,7 +379,7 @@ if item_rows:
             top_u, x="cantidad", y="nombre", orientation="h",
             title="Top 10 — Unidades vendidas",
             color_discrete_sequence=["#4f87ff"],
-            labels={"cantidad": "Unidades", "nombre": ""},
+            labels={"cantidad":"Unidades","nombre":""},
             text="cantidad",
         )
         fig_tu.update_layout(
@@ -332,7 +398,7 @@ if item_rows:
             top_v, x="valor_total", y="nombre", orientation="h",
             title="Top 10 — Valor ($)",
             color_discrete_sequence=["#22c77a"],
-            labels={"valor_total": "Valor ($)", "nombre": ""},
+            labels={"valor_total":"Valor ($)","nombre":""},
             text=top_v["valor_total"].apply(lambda v: f"${v:,.0f}"),
         )
         fig_tv.update_layout(
@@ -342,41 +408,40 @@ if item_rows:
         st.plotly_chart(fig_tv, use_container_width=True)
 
     with st.expander("📋 Tabla completa de productos"):
-        tabla_prod = (
-            df_items.groupby(["sku_id", "nombre"]).agg(
-                Unidades=("cantidad", "sum"),
-                Valor=("valor_total", "sum"),
+        tabla_p = (
+            df_items.groupby(["sku_id","nombre"]).agg(
+                Unidades=("cantidad","sum"),
+                Valor=("valor_total","sum"),
             ).reset_index().sort_values("Valor", ascending=False)
         )
-        tabla_prod["Valor"] = tabla_prod["Valor"].apply(lambda v: f"${v:,.0f}")
+        tabla_p["Valor"] = tabla_p["Valor"].apply(lambda v: f"${v:,.0f}")
         st.dataframe(
-            tabla_prod.rename(columns={"sku_id": "SKU", "nombre": "Producto"}),
+            tabla_p.rename(columns={"sku_id":"SKU","nombre":"Producto"}),
             use_container_width=True, hide_index=True,
         )
 else:
-    st.info("No se encontró detalle de ítems en las órdenes del período.")
+    st.info("No se encontró detalle de productos para el período seleccionado.")
 
 st.divider()
 
 # ── TABLA DE ÓRDENES ──────────────────────────────────────────────────────────
-with st.expander("🗂️ Ver todas las órdenes"):
-    cols_show = ["order_id", "marketplace", "fecha", "status", "gmv", "discount", "total", "units"]
-    df_show   = df[cols_show].copy()
+with st.expander("🗂️ Ver todas las órdenes de marketplace"):
+    df_show = df[["order_id","marketplace","fecha","status","gmv","discount","total","units"]].copy()
     df_show["gmv"]      = df_show["gmv"].apply(lambda v: f"${v:,.0f}")
     df_show["discount"] = df_show["discount"].apply(lambda v: f"${v:,.0f}")
     df_show["total"]    = df_show["total"].apply(lambda v: f"${v:,.0f}")
     st.dataframe(
         df_show.rename(columns={
-            "order_id": "Orden", "marketplace": "Marketplace",
-            "fecha": "Fecha", "status": "Estado",
-            "gmv": "GMV", "discount": "Descuento",
-            "total": "Total", "units": "Unidades",
+            "order_id":"Orden","marketplace":"Marketplace","fecha":"Fecha",
+            "status":"Estado","gmv":"GMV","discount":"Descuento",
+            "total":"Total","units":"Unidades",
         }),
         use_container_width=True, hide_index=True,
     )
 
 st.divider()
 st.caption(
-    f"VTEX Control Comercial · Cuenta: {st.secrets.get('VTEX_ACCOUNT', '—')} · "
-    f"{fecha_desde.strftime('%d/%m/%Y')} → {fecha_hasta.strftime('%d/%m/%Y')}"
+    f"VTEX Control · {st.secrets.get('VTEX_ACCOUNT','—')} · "
+    f"{fecha_desde.strftime('%d/%m/%Y')} → {fecha_hasta.strftime('%d/%m/%Y')} · "
+    f"Solo pedidos: DFT · GVL · VPC · DDD · FFF · MLB · MPX · FLB · PLT"
 )
