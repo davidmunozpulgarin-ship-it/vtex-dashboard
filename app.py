@@ -119,6 +119,14 @@ def render_marketplace_detail(df_mp: pd.DataFrame, mp_name: str):
     st.markdown(f"### 🔍 Detalle Exclusivo — {mp_name}")
     st.caption("Información detallada únicamente de este canal de venta")
 
+    # Agregar columnas si no existen (cache viejo sin estos campos)
+    if "gender" not in df_mp.columns:
+        df_mp = df_mp.copy()
+        df_mp["gender"] = None
+    if "city" not in df_mp.columns:
+        df_mp = df_mp.copy()
+        df_mp["city"] = None
+
     col_g, col_c = st.columns(2)
 
     # ── Ventas por Género ─────────────────────────────────────────────────────
