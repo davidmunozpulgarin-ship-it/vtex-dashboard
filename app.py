@@ -226,7 +226,6 @@ def cargar_items(dias: int):
         mp = __import__('vtex_api').get_marketplace(o.get("orderId",""))
         items = o.get("items") or []
 for item in items:
-    ...
             rows.append({
                 "marketplace":   mp,
                 "sku_id":        item.get("id",""),
