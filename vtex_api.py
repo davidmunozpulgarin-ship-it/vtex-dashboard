@@ -120,11 +120,6 @@ def fetch_order_detail(order_id):
 
 
 def parse_orders(raw_orders, enrich_sample=150):
-    """
-    GMV = valor pagado por el cliente (o.value / 100).
-    Descuento = diferencia entre precio de lista (Items) y lo pagado.
-    No se suma descuento al total — eso causaba el triple conteo.
-    """
     rows    = []
     total_n = len(raw_orders)
 
@@ -140,21 +135,19 @@ def parse_orders(raw_orders, enrich_sample=150):
             if not mp_name:
                 continue
 
-            # Enriquecer con detalle completo para tener items y totals reales
+            # Enriquecer con detalle para obtener items y totals completos
             if idx < enrich_sample:
                 detail = fetch_order_detail(order_id)
                 if detail:
                     o = detail
                 time.sleep(0.12)
 
-            # ── GMV = lo que pagó el cliente ──────────────────────────────
-            # VTEX guarda el valor en centavos → dividir entre 100
+            # ── GMV = valor pagado por el cliente (centavos → /100) ───────
             gmv_val = float(o.get("value", 0) or o.get("totalValue", 0) or 0) / 100
 
-            # ── Descuento = campo Discounts de totals (informativo) ───────
+            # ── Descuentos e items de totals (solo informativo) ───────────
             discount_val = 0.0
             shipping_val = 0.0
-            items_bruto  = 0.0
             for t in (o.get("totals") or []):
                 if isinstance(t, dict):
                     tid = t.get("id", "")
@@ -163,8 +156,6 @@ def parse_orders(raw_orders, enrich_sample=150):
                         discount_val = abs(val) / 100
                     elif tid == "Shipping":
                         shipping_val = val / 100
-                    elif tid == "Items":
-                        items_bruto = val / 100
 
             # ── Items ─────────────────────────────────────────────────────
             items = o.get("items") or []
@@ -177,6 +168,7 @@ def parse_orders(raw_orders, enrich_sample=150):
             for i in items:
                 if isinstance(i, dict):
                     qty   = int(i.get("quantity", 0) or 0)
+                    # sellingPrice = precio con descuento (lo que pagó), en centavos
                     price = float(i.get("sellingPrice", 0) or i.get("price", 0) or 0) / 100
                     units += qty
                     sku_ids.append(str(i.get("id", "")))
@@ -199,10 +191,10 @@ def parse_orders(raw_orders, enrich_sample=150):
                 "created_at":  str(o.get("creationDate", "")),
                 "status":      status_label,
                 "status_raw":  raw_status,
-                "gmv":         gmv_val,       # ← valor pagado por cliente
-                "discount":    discount_val,  # ← informativo
+                "gmv":         gmv_val,
+                "discount":    discount_val,
                 "shipping":    shipping_val,
-                "total":       gmv_val,       # mismo que gmv (es el pagado)
+                "total":       gmv_val,
                 "units":       units,
                 "sku_ids":     sku_ids,
                 "items":       item_rows,
