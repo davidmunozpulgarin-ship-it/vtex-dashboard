@@ -16,22 +16,58 @@ st.markdown("""
 <style>
 [data-testid="stAppViewContainer"] { background: #0f1117; }
 [data-testid="stSidebar"] { background: #171b26; }
-section[data-testid="stSidebar"] * { color: #e8eaf2; }
+
+/* ── Sidebar: textos legibles ── */
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] .stSelectbox label,
+section[data-testid="stSidebar"] .stMultiSelect label,
+section[data-testid="stSidebar"] .stDateInput label,
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] div {
+    color: #e8eaf2 !important;
+}
+/* Opciones dentro de selectbox y multiselect */
+section[data-testid="stSidebar"] [data-baseweb="select"] *,
+section[data-testid="stSidebar"] [data-baseweb="tag"] {
+    color: #e8eaf2 !important;
+    background-color: #232738 !important;
+}
+/* Input de fecha */
+section[data-testid="stSidebar"] input {
+    color: #e8eaf2 !important;
+    background-color: #232738 !important;
+    border: 1px solid rgba(255,255,255,0.15) !important;
+    border-radius: 6px !important;
+}
+/* Fondo del dropdown */
+[data-baseweb="popover"] { background: #232738 !important; }
+[data-baseweb="menu"] li { color: #e8eaf2 !important; }
+[data-baseweb="menu"] li:hover { background: #2e3347 !important; }
+
+/* ── Métricas ── */
 [data-testid="metric-container"] {
     background: #171b26;
     border: 1px solid rgba(255,255,255,0.08);
     border-radius: 12px;
     padding: 14px 18px;
 }
-[data-testid="stMetricValue"] { color: #e8eaf2 !important; font-size: 24px !important; font-weight: 700 !important; }
+[data-testid="stMetricValue"] { color: #e8eaf2 !important; font-size: 22px !important; font-weight: 700 !important; }
 [data-testid="stMetricLabel"] { color: #8b90a7 !important; font-size: 11px !important; text-transform: uppercase; }
 h1,h2,h3,h4 { color: #e8eaf2 !important; }
-p, li { color: #8b90a7; }
 div[data-testid="stPlotlyChart"] { border-radius: 12px; overflow: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
 COLORS = ["#FF3560","#4f87ff","#22c77a","#f5a524","#a78bfa","#34d399","#eab308","#f03e3e","#fb923c","#c084fc"]
+
+PLOT_BASE = dict(
+    paper_bgcolor="#171b26",
+    plot_bgcolor="#171b26",
+    font_color="#8b90a7",
+    title_font_color="#e8eaf2",
+    showlegend=False,
+)
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -39,14 +75,15 @@ with st.sidebar:
     st.markdown("**Colombia · Producción**")
     st.divider()
 
-    st.markdown("#### 📅 Rango de fechas")
     hoy = date.today()
 
+    st.markdown("#### 📅 Período")
     preset = st.selectbox(
         "Período rápido",
         ["Hoy", "Últimos 7 días", "Últimos 15 días", "Últimos 30 días",
          "Este mes", "Mes anterior", "Personalizado"],
         index=0,
+        label_visibility="collapsed",
     )
 
     if preset == "Hoy":
@@ -66,37 +103,42 @@ with st.sidebar:
     else:
         default_from, default_to = hoy - timedelta(days=29), hoy
 
-    fecha_desde = st.date_input("Desde", value=default_from, max_value=hoy)
-    fecha_hasta = st.date_input("Hasta", value=default_to,   max_value=hoy)
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        fecha_desde = st.date_input("Desde", value=default_from, max_value=hoy)
+    with col_d2:
+        fecha_hasta = st.date_input("Hasta", value=default_to, max_value=hoy)
 
     if fecha_desde > fecha_hasta:
         st.error("'Desde' no puede ser mayor que 'Hasta'.")
         st.stop()
 
     st.divider()
+
     st.markdown("#### 🏪 Marketplace")
     mp_opciones = ["Todos"] + sorted(MP_SUFFIX.values())
-    mp_sel = st.selectbox("Canal", mp_opciones)
+    mp_sel = st.selectbox("Canal", mp_opciones, label_visibility="collapsed")
+
+    st.divider()
 
     st.markdown("#### 📋 Estado")
-    estados_disp  = list(STATUS_LABEL.values())
-    estados_sel   = st.multiselect(
+    estados_disp = list(STATUS_LABEL.values())
+    estados_sel  = st.multiselect(
         "Filtrar estado",
         options=estados_disp,
         default=estados_disp,
+        label_visibility="collapsed",
     )
 
     st.divider()
     actualizar = st.button("🔄 Actualizar datos", use_container_width=True, type="primary")
-    st.caption(f"Cuenta: **{st.secrets.get('VTEX_ACCOUNT','—')}**")
-    st.caption("🟢 API conectada")
+
     st.divider()
+    st.caption(f"Cuenta: **{st.secrets.get('VTEX_ACCOUNT', '—')}**")
+    st.caption("🟢 API conectada")
     st.markdown(
-        "**Estados consultados:**\n"
-        "- ✅ Facturado\n"
-        "- 📦 Listo para preparación\n"
-        "- 🔧 Preparando\n"
-        "- 💳 Pago aprobado"
+        "<small style='color:#555a72'>✅ Facturado &nbsp;·&nbsp; 📦 Listo &nbsp;·&nbsp; 🔧 Preparando &nbsp;·&nbsp; 💳 Pago aprobado</small>",
+        unsafe_allow_html=True,
     )
 
 # ── CARGA ─────────────────────────────────────────────────────────────────────
@@ -106,7 +148,7 @@ cache_key       = f"{fecha_desde_str}_{fecha_hasta_str}"
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def cargar_datos(key, f_desde, f_hasta):
-    with st.spinner(f"📡 Consultando VTEX: {f_desde} → {f_hasta} (solo marketplaces)..."):
+    with st.spinner(f"📡 Consultando VTEX: {f_desde} → {f_hasta}..."):
         raw    = fetch_orders(f_desde, f_hasta)
         parsed = parse_orders(raw)
     if not parsed:
@@ -131,17 +173,14 @@ if df_full.empty:
     )
     st.stop()
 
-# ── FILTROS ────────────────────────────────────────────────────────────────────
+# ── FILTROS ───────────────────────────────────────────────────────────────────
 df = df_full.copy()
-
 if mp_sel != "Todos":
     df = df[df["marketplace"] == mp_sel]
-
 if estados_sel:
     df = df[df["status"].isin(estados_sel)]
-
 if df.empty:
-    st.info(f"Sin órdenes para los filtros seleccionados.")
+    st.info("Sin órdenes para los filtros seleccionados.")
     st.stop()
 
 dias_rango = (fecha_hasta - fecha_desde).days + 1
@@ -159,15 +198,15 @@ st.divider()
 gmv_total   = df["gmv"].sum()
 pedidos     = len(df)
 descuentos  = df["discount"].sum()
-ticket_prom = df["total"].mean() if pedidos > 0 else 0
+ticket_prom = df["gmv"].mean() if pedidos > 0 else 0
 unidades    = df["units"].sum()
-pct_desc    = (descuentos / gmv_total * 100) if gmv_total > 0 else 0
+pct_desc    = (descuentos / (gmv_total + descuentos) * 100) if (gmv_total + descuentos) > 0 else 0
 gmv_dia     = gmv_total / dias_rango if dias_rango > 0 else 0
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("💰 GMV Total",       f"${gmv_total:,.0f}")
 c2.metric("🛒 Pedidos",         f"{pedidos:,}")
-c3.metric("🎟️ Descuentos",      f"${descuentos:,.0f}", f"{pct_desc:.1f}% del GMV")
+c3.metric("🎟️ Descuentos",      f"${descuentos:,.0f}", f"{pct_desc:.1f}% sobre precio lista")
 c4.metric("🧾 Ticket Promedio", f"${ticket_prom:,.0f}")
 c5.metric("📦 Unidades",        f"{unidades:,}")
 c6.metric("📈 GMV / Día",       f"${gmv_dia:,.0f}")
@@ -185,18 +224,13 @@ col_e1, col_e2 = st.columns(2)
 with col_e1:
     fig_est = px.bar(
         est_counts, x="status", y="Pedidos",
-        color="status",
-        color_discrete_sequence=COLORS,
+        color="status", color_discrete_sequence=COLORS,
         title="Pedidos por estado",
         labels={"status": "", "Pedidos": "Cantidad"},
         text="Pedidos",
     )
     fig_est.update_traces(textposition="outside")
-    fig_est.update_layout(
-        paper_bgcolor="#171b26", plot_bgcolor="#171b26",
-        font_color="#8b90a7", showlegend=False,
-        title_font_color="#e8eaf2", height=320,
-    )
+    fig_est.update_layout(**PLOT_BASE, height=320)
     st.plotly_chart(fig_est, use_container_width=True)
 
 with col_e2:
@@ -224,8 +258,8 @@ gmv_mp = df.groupby("marketplace").agg(
     Descuentos=("discount", "sum"),
     Unidades=("units", "sum"),
 ).reset_index().sort_values("GMV", ascending=False)
-gmv_mp["Ticket"] = (gmv_mp["GMV"] / gmv_mp["Pedidos"]).round(0)
-gmv_mp["PctDesc"] = (gmv_mp["Descuentos"] / gmv_mp["GMV"] * 100).round(1)
+gmv_mp["Ticket"]  = (gmv_mp["GMV"] / gmv_mp["Pedidos"]).round(0)
+gmv_mp["PctDesc"] = (gmv_mp["Descuentos"] / (gmv_mp["GMV"] + gmv_mp["Descuentos"]) * 100).round(1)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -237,11 +271,7 @@ with col1:
         text=gmv_mp["GMV"].apply(lambda v: f"${v/1e6:.1f}M" if v >= 1e6 else f"${v/1e3:.0f}K"),
     )
     fig_gmv.update_traces(textposition="outside")
-    fig_gmv.update_layout(
-        paper_bgcolor="#171b26", plot_bgcolor="#171b26",
-        font_color="#8b90a7", showlegend=False,
-        title_font_color="#e8eaf2", height=340,
-    )
+    fig_gmv.update_layout(**PLOT_BASE, height=340)
     st.plotly_chart(fig_gmv, use_container_width=True)
 
 with col2:
@@ -253,40 +283,30 @@ with col2:
         text="Pedidos",
     )
     fig_ped.update_traces(textposition="outside")
-    fig_ped.update_layout(
-        paper_bgcolor="#171b26", plot_bgcolor="#171b26",
-        font_color="#8b90a7", showlegend=False,
-        title_font_color="#e8eaf2", height=340,
-    )
+    fig_ped.update_layout(**PLOT_BASE, height=340)
     st.plotly_chart(fig_ped, use_container_width=True)
 
-# Descuentos
 desc_mp = gmv_mp.sort_values("PctDesc", ascending=True)
 fig_desc = px.bar(
     desc_mp, x="PctDesc", y="marketplace", orientation="h",
     color="PctDesc", color_continuous_scale="RdYlGn_r",
-    title="Descuento como % del GMV por Canal",
+    title="Descuento como % del precio lista por Canal",
     labels={"PctDesc": "% Descuento", "marketplace": ""},
     text=desc_mp["PctDesc"].apply(lambda v: f"{v:.1f}%"),
 )
 fig_desc.update_traces(textposition="outside")
-fig_desc.update_layout(
-    paper_bgcolor="#171b26", plot_bgcolor="#171b26",
-    font_color="#8b90a7", showlegend=False,
-    title_font_color="#e8eaf2", height=320, coloraxis_showscale=False,
-)
+fig_desc.update_layout(**PLOT_BASE, height=320, coloraxis_showscale=False)
 st.plotly_chart(fig_desc, use_container_width=True)
 
-# Tabla resumen
 st.markdown("##### Resumen por Marketplace")
 tabla_res = gmv_mp.copy()
-tabla_res["GMV"]       = tabla_res["GMV"].apply(lambda v: f"${v:,.0f}")
-tabla_res["Descuentos"]= tabla_res["Descuentos"].apply(lambda v: f"${v:,.0f}")
-tabla_res["Ticket"]    = tabla_res["Ticket"].apply(lambda v: f"${v:,.0f}")
-tabla_res["PctDesc"]   = tabla_res["PctDesc"].apply(lambda v: f"{v}%")
+tabla_res["GMV"]        = tabla_res["GMV"].apply(lambda v: f"${v:,.0f}")
+tabla_res["Descuentos"] = tabla_res["Descuentos"].apply(lambda v: f"${v:,.0f}")
+tabla_res["Ticket"]     = tabla_res["Ticket"].apply(lambda v: f"${v:,.0f}")
+tabla_res["PctDesc"]    = tabla_res["PctDesc"].apply(lambda v: f"{v}%")
 st.dataframe(
     tabla_res.rename(columns={
-        "marketplace":"Marketplace","PctDesc":"% Desc.","Ticket":"Ticket Prom."
+        "marketplace": "Marketplace", "PctDesc": "% Desc.", "Ticket": "Ticket Prom."
     })[["Marketplace","GMV","Pedidos","Descuentos","Ticket Prom.","Unidades","% Desc."]],
     use_container_width=True, hide_index=True,
 )
@@ -296,9 +316,8 @@ st.divider()
 # ── TENDENCIA DIARIA ──────────────────────────────────────────────────────────
 st.markdown("### 📈 Tendencia Diaria")
 tend = df.groupby("fecha").agg(
-    Pedidos=("order_id","count"),
-    GMV=("gmv","sum"),
-    Descuentos=("discount","sum"),
+    Pedidos=("order_id", "count"),
+    GMV=("gmv", "sum"),
 ).reset_index()
 tend["fecha"] = pd.to_datetime(tend["fecha"])
 
@@ -349,7 +368,7 @@ if skus_unicos:
         i2.metric("🟡 Stock bajo", bajos)
         i3.metric("🟢 Stock OK",   len(df_inv) - criticos - bajos)
         st.dataframe(
-            df_inv.rename(columns={"sku_id":"SKU","available":"Stock disponible"}),
+            df_inv.rename(columns={"sku_id": "SKU", "available": "Stock disponible"}),
             use_container_width=True, hide_index=True,
         )
 else:
@@ -379,13 +398,10 @@ if item_rows:
             top_u, x="cantidad", y="nombre", orientation="h",
             title="Top 10 — Unidades vendidas",
             color_discrete_sequence=["#4f87ff"],
-            labels={"cantidad":"Unidades","nombre":""},
+            labels={"cantidad": "Unidades", "nombre": ""},
             text="cantidad",
         )
-        fig_tu.update_layout(
-            paper_bgcolor="#171b26", plot_bgcolor="#171b26",
-            font_color="#8b90a7", title_font_color="#e8eaf2", height=380,
-        )
+        fig_tu.update_layout(**PLOT_BASE, height=380)
         st.plotly_chart(fig_tu, use_container_width=True)
 
     with col2:
@@ -398,25 +414,22 @@ if item_rows:
             top_v, x="valor_total", y="nombre", orientation="h",
             title="Top 10 — Valor ($)",
             color_discrete_sequence=["#22c77a"],
-            labels={"valor_total":"Valor ($)","nombre":""},
+            labels={"valor_total": "Valor ($)", "nombre": ""},
             text=top_v["valor_total"].apply(lambda v: f"${v:,.0f}"),
         )
-        fig_tv.update_layout(
-            paper_bgcolor="#171b26", plot_bgcolor="#171b26",
-            font_color="#8b90a7", title_font_color="#e8eaf2", height=380,
-        )
+        fig_tv.update_layout(**PLOT_BASE, height=380)
         st.plotly_chart(fig_tv, use_container_width=True)
 
     with st.expander("📋 Tabla completa de productos"):
         tabla_p = (
             df_items.groupby(["sku_id","nombre"]).agg(
-                Unidades=("cantidad","sum"),
-                Valor=("valor_total","sum"),
+                Unidades=("cantidad", "sum"),
+                Valor=("valor_total", "sum"),
             ).reset_index().sort_values("Valor", ascending=False)
         )
         tabla_p["Valor"] = tabla_p["Valor"].apply(lambda v: f"${v:,.0f}")
         st.dataframe(
-            tabla_p.rename(columns={"sku_id":"SKU","nombre":"Producto"}),
+            tabla_p.rename(columns={"sku_id": "SKU", "nombre": "Producto"}),
             use_container_width=True, hide_index=True,
         )
 else:
@@ -426,22 +439,20 @@ st.divider()
 
 # ── TABLA DE ÓRDENES ──────────────────────────────────────────────────────────
 with st.expander("🗂️ Ver todas las órdenes de marketplace"):
-    df_show = df[["order_id","marketplace","fecha","status","gmv","discount","total","units"]].copy()
+    df_show = df[["order_id","marketplace","fecha","status","gmv","discount","units"]].copy()
     df_show["gmv"]      = df_show["gmv"].apply(lambda v: f"${v:,.0f}")
     df_show["discount"] = df_show["discount"].apply(lambda v: f"${v:,.0f}")
-    df_show["total"]    = df_show["total"].apply(lambda v: f"${v:,.0f}")
     st.dataframe(
         df_show.rename(columns={
-            "order_id":"Orden","marketplace":"Marketplace","fecha":"Fecha",
-            "status":"Estado","gmv":"GMV","discount":"Descuento",
-            "total":"Total","units":"Unidades",
+            "order_id": "Orden", "marketplace": "Marketplace", "fecha": "Fecha",
+            "status": "Estado", "gmv": "GMV (pagado)", "discount": "Descuento", "units": "Unidades",
         }),
         use_container_width=True, hide_index=True,
     )
 
 st.divider()
 st.caption(
-    f"VTEX Control · {st.secrets.get('VTEX_ACCOUNT','—')} · "
+    f"VTEX Control · {st.secrets.get('VTEX_ACCOUNT', '—')} · "
     f"{fecha_desde.strftime('%d/%m/%Y')} → {fecha_hasta.strftime('%d/%m/%Y')} · "
     f"Solo pedidos: DFT · GVL · VPC · DDD · FFF · MLB · MPX · FLB · PLT"
 )
