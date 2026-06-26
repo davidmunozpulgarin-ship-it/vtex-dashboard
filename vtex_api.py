@@ -142,12 +142,83 @@ def fetch_order_detail(order_id):
     return None
 
 
+# ── NUEVO: extrae género del cliente desde el detalle de la orden ─────────────
+def _extract_gender(order_detail: dict) -> str | None:
+    """
+    Intenta extraer el género del cliente desde los campos más comunes
+    que VTEX expone: customData, clientProfileData o marketingData.
+    Retorna 'Hombre', 'Mujer' o None si no está disponible.
+    """
+    if not order_detail:
+        return None
+
+    # 1) customData → customApps → fields
+    custom_data = order_detail.get("customData") or {}
+    for app in (custom_data.get("customApps") or []):
+        fields = app.get("fields") or {}
+        for key, val in fields.items():
+            if "gender" in key.lower() or "genero" in key.lower() or "sexo" in key.lower():
+                val_str = str(val).strip().lower()
+                if val_str in ("m", "male", "masculino", "hombre", "h"):
+                    return "Hombre"
+                if val_str in ("f", "female", "femenino", "mujer"):
+                    return "Mujer"
+
+    # 2) clientProfileData → gender
+    cpd = order_detail.get("clientProfileData") or {}
+    gender_raw = str(cpd.get("gender", "") or "").strip().lower()
+    if gender_raw in ("m", "male", "masculino", "hombre", "h"):
+        return "Hombre"
+    if gender_raw in ("f", "female", "femenino", "mujer"):
+        return "Mujer"
+
+    # 3) marketingData → utmSource / utmCampaign (heurístico, si aplica)
+    # No es fiable — omitimos para no generar ruido.
+
+    return None
+
+
+# ── NUEVO: extrae ciudad del cliente desde el detalle de la orden ─────────────
+def _extract_city(order_detail: dict) -> str | None:
+    """
+    Intenta extraer la ciudad de envío desde shippingData o
+    la ciudad de facturación desde clientProfileData.
+    """
+    if not order_detail:
+        return None
+
+    # 1) shippingData → address → city
+    shipping = order_detail.get("shippingData") or {}
+    address  = shipping.get("address") or {}
+    city     = str(address.get("city", "") or "").strip()
+    if city:
+        return city.title()
+
+    # 2) Puede venir en selectedAddresses (lista)
+    for addr in (shipping.get("selectedAddresses") or []):
+        city = str((addr or {}).get("city", "") or "").strip()
+        if city:
+            return city.title()
+
+    # 3) clientProfileData → city (menos frecuente)
+    cpd  = order_detail.get("clientProfileData") or {}
+    city = str(cpd.get("city", "") or "").strip()
+    if city:
+        return city.title()
+
+    return None
+
+
 def parse_orders(raw_orders, enrich_sample=150):
     """
     GMV = value / 100 (valor pagado por el cliente en pesos).
     Filtra además que la fecha de creación esté en hora Colombia
     dentro del rango solicitado (para descartar órdenes UTC que
     se cuelan por el desfase horario).
+
+    ADICIONADO (sin cambiar lógica existente):
+      - Extrae campo 'gender' → 'Hombre' / 'Mujer' / None
+      - Extrae campo 'city'   → nombre de ciudad o None
     """
     rows    = []
     total_n = len(raw_orders)
@@ -165,6 +236,7 @@ def parse_orders(raw_orders, enrich_sample=150):
                 continue
 
             # Enriquecer con detalle para obtener items completos
+            detail = None
             if idx < enrich_sample:
                 detail = fetch_order_detail(order_id)
                 if detail:
@@ -222,6 +294,12 @@ def parse_orders(raw_orders, enrich_sample=150):
             raw_status   = str(o.get("status", ""))
             status_label = STATUS_LABEL.get(raw_status, raw_status)
 
+            # ── NUEVO: género y ciudad ─────────────────────────────────────
+            # Usamos `detail` si se enriqueció, sino el objeto `o` actual
+            source_for_extras = detail if detail else o
+            gender = _extract_gender(source_for_extras)
+            city   = _extract_city(source_for_extras)
+
             rows.append({
                 "order_id":    order_id,
                 "marketplace": mp_name,
@@ -236,6 +314,9 @@ def parse_orders(raw_orders, enrich_sample=150):
                 "units":       units,
                 "sku_ids":     sku_ids,
                 "items":       item_rows,
+                # ── campos nuevos ──────────────────────────────────────────
+                "gender":      gender,   # 'Hombre' | 'Mujer' | None
+                "city":        city,     # str | None
             })
 
         except Exception:
