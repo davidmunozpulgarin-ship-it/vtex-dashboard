@@ -16,36 +16,27 @@ st.markdown("""
 <style>
 [data-testid="stAppViewContainer"] { background: #0f1117; }
 [data-testid="stSidebar"] { background: #171b26; }
-
-/* ── Sidebar: textos legibles ── */
 section[data-testid="stSidebar"] label,
 section[data-testid="stSidebar"] .stSelectbox label,
 section[data-testid="stSidebar"] .stMultiSelect label,
 section[data-testid="stSidebar"] .stDateInput label,
 section[data-testid="stSidebar"] p,
 section[data-testid="stSidebar"] span,
-section[data-testid="stSidebar"] div {
-    color: #e8eaf2 !important;
-}
-/* Opciones dentro de selectbox y multiselect */
+section[data-testid="stSidebar"] div { color: #e8eaf2 !important; }
 section[data-testid="stSidebar"] [data-baseweb="select"] *,
 section[data-testid="stSidebar"] [data-baseweb="tag"] {
     color: #e8eaf2 !important;
     background-color: #232738 !important;
 }
-/* Input de fecha */
 section[data-testid="stSidebar"] input {
     color: #e8eaf2 !important;
     background-color: #232738 !important;
     border: 1px solid rgba(255,255,255,0.15) !important;
     border-radius: 6px !important;
 }
-/* Fondo del dropdown */
 [data-baseweb="popover"] { background: #232738 !important; }
 [data-baseweb="menu"] li { color: #e8eaf2 !important; }
 [data-baseweb="menu"] li:hover { background: #2e3347 !important; }
-
-/* ── Métricas ── */
 [data-testid="metric-container"] {
     background: #171b26;
     border: 1px solid rgba(255,255,255,0.08);
@@ -60,14 +51,7 @@ div[data-testid="stPlotlyChart"] { border-radius: 12px; overflow: hidden; }
 """, unsafe_allow_html=True)
 
 COLORS = ["#FF3560","#4f87ff","#22c77a","#f5a524","#a78bfa","#34d399","#eab308","#f03e3e","#fb923c","#c084fc"]
-
-PLOT_BASE = dict(
-    paper_bgcolor="#171b26",
-    plot_bgcolor="#171b26",
-    font_color="#8b90a7",
-    title_font_color="#e8eaf2",
-    showlegend=False,
-)
+PLOT_BASE = dict(paper_bgcolor="#171b26", plot_bgcolor="#171b26", font_color="#8b90a7", title_font_color="#e8eaf2", showlegend=False)
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -114,13 +98,11 @@ with st.sidebar:
         st.stop()
 
     st.divider()
-
     st.markdown("#### 🏪 Marketplace")
     mp_opciones = ["Todos"] + sorted(MP_SUFFIX.values())
     mp_sel = st.selectbox("Canal", mp_opciones, label_visibility="collapsed")
 
     st.divider()
-
     st.markdown("#### 📋 Estado")
     estados_disp = list(STATUS_LABEL.values())
     estados_sel  = st.multiselect(
@@ -132,12 +114,11 @@ with st.sidebar:
 
     st.divider()
     actualizar = st.button("🔄 Actualizar datos", use_container_width=True, type="primary")
-
     st.divider()
     st.caption(f"Cuenta: **{st.secrets.get('VTEX_ACCOUNT', '—')}**")
-    st.caption("🟢 API conectada")
+    st.caption("🟢 API conectada · Hora Colombia (UTC-5)")
     st.markdown(
-        "<small style='color:#555a72'>✅ Facturado &nbsp;·&nbsp; 📦 Listo &nbsp;·&nbsp; 🔧 Preparando &nbsp;·&nbsp; 💳 Pago aprobado</small>",
+        "<small style='color:#555a72'>✅ Facturado · 📦 Listo · 🔧 Preparando · 💳 Pago aprobado</small>",
         unsafe_allow_html=True,
     )
 
@@ -148,14 +129,26 @@ cache_key       = f"{fecha_desde_str}_{fecha_hasta_str}"
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def cargar_datos(key, f_desde, f_hasta):
-    with st.spinner(f"📡 Consultando VTEX: {f_desde} → {f_hasta}..."):
+    with st.spinner(f"📡 Consultando VTEX: {f_desde} → {f_hasta} (hora Colombia)..."):
         raw    = fetch_orders(f_desde, f_hasta)
         parsed = parse_orders(raw)
     if not parsed:
         return pd.DataFrame()
     df = pd.DataFrame(parsed)
-    df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
-    df["fecha"]      = df["created_at"].dt.date
+
+    # "fecha" ya viene en hora Colombia desde vtex_api.py
+    # Si por algún motivo es None, la recalculamos
+    if "fecha" not in df.columns or df["fecha"].isna().all():
+        from datetime import timezone, timedelta
+        COL_TZ = timezone(timedelta(hours=-5))
+        df["created_at_dt"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
+        df["fecha"] = df["created_at_dt"].dt.tz_convert(COL_TZ).dt.date
+
+    # Filtrar solo órdenes cuya fecha Colombia esté en el rango pedido
+    fecha_desde_d = date.fromisoformat(f_desde)
+    fecha_hasta_d = date.fromisoformat(f_hasta)
+    df = df[df["fecha"].between(fecha_desde_d, fecha_hasta_d)]
+
     return df
 
 if actualizar:
@@ -167,7 +160,7 @@ if df_full.empty:
     st.markdown("## 🛍️ VTEX Control Comercial")
     st.warning(
         f"No se encontraron pedidos de marketplace entre "
-        f"**{fecha_desde_str}** y **{fecha_hasta_str}**.\n\n"
+        f"**{fecha_desde_str}** y **{fecha_hasta_str}** (hora Colombia).\n\n"
         "Verifica que existan órdenes con los sufijos: "
         "DFT · GVL · VPC · DDD · FFF · MLB · MPX · FLB · PLT"
     )
@@ -190,7 +183,7 @@ titulo     = "Todos los Marketplaces" if mp_sel == "Todos" else mp_sel
 st.markdown(f"## {titulo}")
 st.caption(
     f"{fecha_desde.strftime('%d/%m/%Y')} → {fecha_hasta.strftime('%d/%m/%Y')} · "
-    f"**{len(df):,}** pedidos de marketplace · {dias_rango} día(s)"
+    f"**{len(df):,}** pedidos de marketplace · {dias_rango} día(s) · hora Colombia"
 )
 st.divider()
 
@@ -444,7 +437,7 @@ with st.expander("🗂️ Ver todas las órdenes de marketplace"):
     df_show["discount"] = df_show["discount"].apply(lambda v: f"${v:,.0f}")
     st.dataframe(
         df_show.rename(columns={
-            "order_id": "Orden", "marketplace": "Marketplace", "fecha": "Fecha",
+            "order_id": "Orden", "marketplace": "Marketplace", "fecha": "Fecha (Col)",
             "status": "Estado", "gmv": "GMV (pagado)", "discount": "Descuento", "units": "Unidades",
         }),
         use_container_width=True, hide_index=True,
@@ -454,5 +447,5 @@ st.divider()
 st.caption(
     f"VTEX Control · {st.secrets.get('VTEX_ACCOUNT', '—')} · "
     f"{fecha_desde.strftime('%d/%m/%Y')} → {fecha_hasta.strftime('%d/%m/%Y')} · "
-    f"Solo pedidos: DFT · GVL · VPC · DDD · FFF · MLB · MPX · FLB · PLT"
+    f"Hora Colombia (UTC-5) · DFT · GVL · VPC · DDD · FFF · MLB · MPX · FLB · PLT"
 )
