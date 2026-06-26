@@ -219,18 +219,26 @@ st.markdown("### 🏆 Rendimiento de Productos")
 # En la API de órdenes, el campo "items" trae nombre, SKU, cantidad y precio
 @st.cache_data(ttl=3600, show_spinner="Cargando detalle de productos…")
 def cargar_items(dias: int):
-    from vtex_api import fetch_orders
+    from vtex_api import fetch_orders, get_marketplace
     raw = fetch_orders(days_back=dias)
     rows = []
     for o in raw:
-        mp = __import__('vtex_api').get_marketplace(o.get("orderId",""))
+        if not isinstance(o, dict):
+            continue
+        mp = get_marketplace(o.get("orderId", ""))
         items = o.get("items") or []
-for item in items:
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            additional_info = item.get("additionalInfo")
+            categoria = additional_info.get("categoriesIds", "") if isinstance(additional_info, dict) else ""
             rows.append({
                 "marketplace":   mp,
-                "sku_id":        item.get("id",""),
-                "nombre":        item.get("name",""),
-                "categoria":     item.get("additionalInfo",{}).get("categoriesIds",""),
+                "sku_id":        item.get("id", ""),
+                "nombre":        item.get("name", ""),
+                "categoria":     categoria,
                 "cantidad":      item.get("quantity", 0),
                 "precio_unit":   item.get("price", 0) / 100,
                 "valor_total":   item.get("price", 0) / 100 * item.get("quantity", 0),
