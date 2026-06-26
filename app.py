@@ -61,11 +61,6 @@ MESES_ES = {
 }
 
 # ── PRESUPUESTOS: persistencia simple en archivo JSON local ─────────────────
-# Nota: este archivo vive en el filesystem del contenedor de Streamlit Cloud.
-# Persiste mientras la app esté corriendo (entre sesiones de distintos
-# usuarios), pero puede reiniciarse si la app se reinicia/redepliega desde
-# GitHub. Para persistencia permanente a futuro, se podría migrar a una
-# base de datos o Google Sheets.
 PRESUPUESTOS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presupuestos.json")
 
 
@@ -89,11 +84,6 @@ def guardar_presupuesto(mes_key: str, valor: float) -> bool:
 
 
 def obtener_presupuesto_rango(f_desde: date, f_hasta: date, presupuestos: dict) -> float:
-    """
-    Suma el presupuesto del rango seleccionado. Si el rango cruza más de un
-    mes, prorratea el presupuesto de cada mes según los días que caen
-    dentro del rango.
-    """
     total  = 0.0
     actual = f_desde
     while actual <= f_hasta:
@@ -111,11 +101,141 @@ def obtener_presupuesto_rango(f_desde: date, f_hasta: date, presupuestos: dict) 
 
 
 def shift_year(d: date) -> date:
-    """Misma fecha del año anterior (29-feb se ajusta a 28-feb)."""
     try:
         return d.replace(year=d.year - 1)
     except ValueError:
         return d.replace(month=2, day=28, year=d.year - 1)
+
+
+# ── NUEVO: sección de detalle por marketplace ─────────────────────────────────
+def render_marketplace_detail(df_mp: pd.DataFrame, mp_name: str):
+    """
+    Renderiza la sección de detalle exclusivo cuando se selecciona
+    un marketplace específico. Muestra ventas por género y ciudades
+    de mayor participación.
+    No toca ningún código existente; se llama justo antes del header
+    cuando mp_sel != 'Todos'.
+    """
+    st.markdown(f"### 🔍 Detalle Exclusivo — {mp_name}")
+    st.caption("Información detallada únicamente de este canal de venta")
+
+    col_g, col_c = st.columns(2)
+
+    # ── Ventas por Género ─────────────────────────────────────────────────────
+    with col_g:
+        st.markdown("#### 👤 Ventas por Género")
+        df_gender = df_mp[df_mp["gender"].notna()].copy()
+
+        if df_gender.empty:
+            st.info(
+                "No se encontró información de género en las órdenes enriquecidas del período. "
+                "El campo está disponible solo en las primeras 150 órdenes procesadas con detalle completo."
+            )
+        else:
+            gen_agg = (
+                df_gender.groupby("gender")
+                .agg(Pedidos=("order_id", "count"), GMV=("gmv", "sum"))
+                .reset_index()
+                .sort_values("GMV", ascending=False)
+            )
+            gen_agg["% Pedidos"] = (gen_agg["Pedidos"] / gen_agg["Pedidos"].sum() * 100).round(1)
+            gen_agg["% GMV"]     = (gen_agg["GMV"]     / gen_agg["GMV"].sum()     * 100).round(1)
+
+            # KPIs rápidos
+            for _, r in gen_agg.iterrows():
+                emoji = "👨" if r["gender"] == "Hombre" else "👩"
+                st.metric(
+                    f"{emoji} {r['gender']}",
+                    f"${r['GMV']:,.0f}",
+                    f"{r['% GMV']:.1f}% del GMV · {r['Pedidos']:,} pedidos ({r['% Pedidos']:.1f}%)",
+                )
+
+            # Gráfico donut
+            fig_gen = px.pie(
+                gen_agg, values="GMV", names="gender",
+                hole=0.55,
+                color_discrete_sequence=["#4f87ff", "#FF3560"],
+                title="GMV por Género",
+            )
+            fig_gen.update_layout(
+                paper_bgcolor="#171b26", font_color="#8b90a7",
+                title_font_color="#e8eaf2", height=280,
+                legend=dict(bgcolor="#171b26", font=dict(color="#8b90a7")),
+                margin=dict(t=40, b=10, l=10, r=10),
+            )
+            st.plotly_chart(fig_gen, use_container_width=True)
+
+            # Tabla
+            tabla_gen = gen_agg.copy()
+            tabla_gen["GMV"] = tabla_gen["GMV"].apply(lambda v: f"${v:,.0f}")
+            st.dataframe(
+                tabla_gen.rename(columns={"gender": "Género", "% Pedidos": "% Pedidos", "% GMV": "% GMV"}),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ── Ciudades de mayor participación ───────────────────────────────────────
+    with col_c:
+        st.markdown("#### 🏙️ Ciudades de Mayor Participación")
+        df_city = df_mp[df_mp["city"].notna() & (df_mp["city"] != "")].copy()
+
+        if df_city.empty:
+            st.info(
+                "No se encontró información de ciudad en las órdenes del período. "
+                "Está disponible en las primeras 150 órdenes procesadas con detalle completo."
+            )
+        else:
+            city_agg = (
+                df_city.groupby("city")
+                .agg(Pedidos=("order_id", "count"), GMV=("gmv", "sum"))
+                .reset_index()
+                .sort_values("GMV", ascending=False)
+            )
+            city_agg["% GMV"] = (city_agg["GMV"] / city_agg["GMV"].sum() * 100).round(1)
+
+            top_cities = city_agg.head(10)
+
+            # Top 3 highlights
+            top3 = top_cities.head(3)
+            medal = ["🥇", "🥈", "🥉"]
+            for i, (_, r) in enumerate(top3.iterrows()):
+                st.metric(
+                    f"{medal[i]} {r['city']}",
+                    f"${r['GMV']:,.0f}",
+                    f"{r['% GMV']:.1f}% del GMV · {r['Pedidos']:,} pedidos",
+                )
+
+            # Gráfico horizontal
+            top_cities_plot = top_cities.sort_values("GMV", ascending=True)
+            fig_city = px.bar(
+                top_cities_plot,
+                x="GMV", y="city", orientation="h",
+                color="GMV",
+                color_continuous_scale=["#232738", "#4f87ff"],
+                title=f"Top {len(top_cities)} Ciudades — GMV",
+                labels={"GMV": "GMV ($)", "city": ""},
+                text=top_cities_plot["GMV"].apply(
+                    lambda v: f"${v/1e6:.1f}M" if v >= 1e6 else f"${v/1e3:.0f}K"
+                ),
+            )
+            fig_city.update_traces(textposition="outside")
+            fig_city.update_layout(
+                **PLOT_BASE,
+                height=340,
+                coloraxis_showscale=False,
+                margin=dict(t=40, b=10, l=10, r=80),
+            )
+            st.plotly_chart(fig_city, use_container_width=True)
+
+            # Tabla completa
+            with st.expander("📋 Ver todas las ciudades"):
+                tabla_city = city_agg.copy()
+                tabla_city["GMV"] = tabla_city["GMV"].apply(lambda v: f"${v:,.0f}")
+                st.dataframe(
+                    tabla_city.rename(columns={"city": "Ciudad", "% GMV": "% GMV"}),
+                    use_container_width=True, hide_index=True,
+                )
+
+    st.divider()
 
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
@@ -253,7 +373,6 @@ def cargar_datos(key, f_desde, f_hasta):
     df = pd.DataFrame(parsed)
 
     # "fecha" ya viene en hora Colombia desde vtex_api.py
-    # Si por algún motivo es None, la recalculamos
     if "fecha" not in df.columns or df["fecha"].isna().all():
         from datetime import timezone, timedelta as td
         COL_TZ = timezone(td(hours=-5))
@@ -323,6 +442,10 @@ st.caption(
     f"**{len(df):,}** pedidos de marketplace · {dias_rango} día(s) · hora Colombia"
 )
 st.divider()
+
+# ── NUEVO: Detalle exclusivo cuando se selecciona un marketplace específico ───
+if mp_sel != "Todos":
+    render_marketplace_detail(df, mp_sel)
 
 # ── KPIs ──────────────────────────────────────────────────────────────────────
 gmv_total   = df["gmv"].sum()
