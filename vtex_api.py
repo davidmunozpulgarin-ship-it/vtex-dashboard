@@ -50,8 +50,7 @@ def fetch_orders(days_back: int = 30) -> list:
                     "f_status": "invoiced,handling,ready-for-handling,waiting-for-fulfillment",
                     "f_creationDate": f"creationDate:[{date_from} TO {date_to}]",
                     "per_page": 100,
-                    "per_page": 100,
-"_page": page,
+                    "page": page,
                 },
                 timeout=30,
             )
@@ -63,7 +62,7 @@ def fetch_orders(days_back: int = 30) -> list:
             orders.extend(batch)
             total_pages = data.get("paging", {}).get("pages", 1)
             if page >= total_pages or page >= 30:
-    break
+                break
             page += 1
             time.sleep(0.4)
         except Exception as e:
@@ -123,4 +122,3 @@ def fetch_inventory(sku_id: str) -> dict:
     except Exception:
         pass
     return {"sku_id": sku_id, "available": -1}
-    
