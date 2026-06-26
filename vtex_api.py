@@ -88,8 +88,8 @@ def parse_orders(raw_orders: list) -> list:
             "discount":    abs(totals.get("Discounts", 0)) / 100,
             "shipping":    totals.get("Shipping", 0) / 100,
             "total":       o.get("value", 0) / 100,
-            "units":       sum(i.get("quantity", 0) for i in items),
-            "sku_ids":     [i.get("id","") for i in items],
+            "units": sum(int(i.get("quantity", 0)) for i in items if isinstance(i, dict)),
+            "sku_ids": [str(i.get("id","")) for i in items if isinstance(i, dict)],
         })
     return rows
 
