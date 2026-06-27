@@ -13,8 +13,9 @@ HEADERS = {
     "Content-Type":        "application/json",
 }
 
-BASE_OMS = f"https://{ACCOUNT}.vtexcommercestable.com.br/api/oms/pvt"
-BASE_LOG = f"https://logistics.vtexcommercestable.com.br/api/logistics/pvt"
+BASE_OMS     = f"https://{ACCOUNT}.vtexcommercestable.com.br/api/oms/pvt"
+BASE_LOG     = f"https://logistics.vtexcommercestable.com.br/api/logistics/pvt"
+BASE_CATALOG = f"https://{ACCOUNT}.vtexcommercestable.com.br/api/catalog/pvt"
 
 # Zona horaria Colombia = UTC-5
 COL_TZ = timezone(timedelta(hours=-5))
@@ -57,10 +58,6 @@ def is_marketplace_order(order_id):
 
 
 def fecha_a_utc(date_str, hora="00:00:00", fin_dia=False):
-    """
-    Convierte una fecha (YYYY-MM-DD) en hora Colombia (UTC-5) a UTC.
-    Si fin_dia=True usa 23:59:59 Colombia = 04:59:59 UTC día siguiente.
-    """
     hora_str = "23:59:59" if fin_dia else "00:00:00"
     dt_col   = datetime.strptime(f"{date_str} {hora_str}", "%Y-%m-%d %H:%M:%S")
     dt_col   = dt_col.replace(tzinfo=COL_TZ)
@@ -69,10 +66,6 @@ def fecha_a_utc(date_str, hora="00:00:00", fin_dia=False):
 
 
 def fetch_orders(date_from_str, date_to_str):
-    """
-    Descarga órdenes usando fechas en hora Colombia convertidas a UTC.
-    Divide en bloques de 7 días para no superar el límite de 30 páginas.
-    """
     from datetime import date as date_type
     date_from = datetime.strptime(date_from_str, "%Y-%m-%d").date()
     date_to   = datetime.strptime(date_to_str,   "%Y-%m-%d").date()
@@ -82,8 +75,6 @@ def fetch_orders(date_from_str, date_to_str):
 
     while current <= date_to:
         chunk_end = min(current + timedelta(days=6), date_to)
-
-        # Convertir a UTC respetando UTC-5
         f_from = fecha_a_utc(current.strftime("%Y-%m-%d"),   fin_dia=False)
         f_to   = fecha_a_utc(chunk_end.strftime("%Y-%m-%d"), fin_dia=True)
 
@@ -142,83 +133,116 @@ def fetch_order_detail(order_id):
     return None
 
 
-# ── NUEVO: extrae género del cliente desde el detalle de la orden ─────────────
-def _extract_gender(order_detail: dict) -> str | None:
-    """
-    Intenta extraer el género del cliente desde los campos más comunes
-    que VTEX expone: customData, clientProfileData o marketingData.
-    Retorna 'Hombre', 'Mujer' o None si no está disponible.
-    """
-    if not order_detail:
-        return None
-
-    # 1) customData → customApps → fields
-    custom_data = order_detail.get("customData") or {}
-    for app in (custom_data.get("customApps") or []):
-        fields = app.get("fields") or {}
-        for key, val in fields.items():
-            if "gender" in key.lower() or "genero" in key.lower() or "sexo" in key.lower():
-                val_str = str(val).strip().lower()
-                if val_str in ("m", "male", "masculino", "hombre", "h"):
-                    return "Hombre"
-                if val_str in ("f", "female", "femenino", "mujer"):
-                    return "Mujer"
-
-    # 2) clientProfileData → gender
-    cpd = order_detail.get("clientProfileData") or {}
-    gender_raw = str(cpd.get("gender", "") or "").strip().lower()
-    if gender_raw in ("m", "male", "masculino", "hombre", "h"):
-        return "Hombre"
-    if gender_raw in ("f", "female", "femenino", "mujer"):
-        return "Mujer"
-
-    # 3) marketingData → utmSource / utmCampaign (heurístico, si aplica)
-    # No es fiable — omitimos para no generar ruido.
-
-    return None
-
-
-# ── NUEVO: extrae ciudad del cliente desde el detalle de la orden ─────────────
+# ── Extrae ciudad de envío desde el detalle de la orden ──────────────────────
 def _extract_city(order_detail: dict) -> str | None:
-    """
-    Intenta extraer la ciudad de envío desde shippingData o
-    la ciudad de facturación desde clientProfileData.
-    """
+    """Ciudad tomada de shippingData (dirección de envío del pedido)."""
     if not order_detail:
         return None
 
-    # 1) shippingData → address → city
     shipping = order_detail.get("shippingData") or {}
-    address  = shipping.get("address") or {}
-    city     = str(address.get("city", "") or "").strip()
+
+    # 1) address directo
+    address = shipping.get("address") or {}
+    city = str(address.get("city", "") or "").strip()
     if city:
         return city.title()
 
-    # 2) Puede venir en selectedAddresses (lista)
+    # 2) selectedAddresses (lista)
     for addr in (shipping.get("selectedAddresses") or []):
         city = str((addr or {}).get("city", "") or "").strip()
         if city:
             return city.title()
 
-    # 3) clientProfileData → city (menos frecuente)
-    cpd  = order_detail.get("clientProfileData") or {}
-    city = str(cpd.get("city", "") or "").strip()
-    if city:
-        return city.title()
-
     return None
+
+
+# ── Consulta el catálogo para obtener género y foto de un SKU ────────────────
+_sku_cache: dict = {}   # cache en memoria para no repetir llamadas
+
+
+def fetch_sku_catalog_info(sku_id: str) -> dict:
+    """
+    Llama a GET /api/catalog/pvt/stockkeepingunit/{skuId}
+    Retorna dict con keys: 'gender' ('Hombre'|'Mujer'|None), 'image_url' (str|None).
+    Usa cache en memoria para evitar llamadas repetidas.
+    """
+    if sku_id in _sku_cache:
+        return _sku_cache[sku_id]
+
+    result = {"gender": None, "image_url": None}
+    try:
+        resp = requests.get(
+            f"{BASE_CATALOG}/stockkeepingunit/{sku_id}",
+            headers=HEADERS,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+
+            # ── Imagen: primer elemento de Images ─────────────────────────
+            images = data.get("Images") or []
+            if images and isinstance(images, list):
+                img = images[0]
+                url = img.get("ImageUrl") or img.get("imageUrl") or ""
+                result["image_url"] = url if url else None
+
+            # ── Género: buscar en especificaciones del producto padre ──────
+            # La especificación "Género" vive en el producto, no en el SKU.
+            # Intentamos con ProductId para ir al producto.
+            product_id = data.get("ProductId")
+            if product_id:
+                result["gender"] = _fetch_product_gender(str(product_id))
+
+    except Exception:
+        pass
+
+    _sku_cache[sku_id] = result
+    return result
+
+
+_product_cache: dict = {}
+
+
+def _fetch_product_gender(product_id: str) -> str | None:
+    """
+    Consulta las especificaciones del producto en el catálogo para
+    obtener el género. Busca campos: Género, Genero, Gender, Sexo.
+    """
+    if product_id in _product_cache:
+        return _product_cache[product_id]
+
+    gender = None
+    try:
+        resp = requests.get(
+            f"{BASE_CATALOG}/product/{product_id}/specification",
+            headers=HEADERS,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            specs = resp.json()  # lista de dicts con FieldName / Value
+            for spec in (specs or []):
+                name = str(spec.get("FieldName", "") or "").strip().lower()
+                if name in ("género", "genero", "gender", "sexo"):
+                    val = str((spec.get("Value") or [""])[0] if isinstance(spec.get("Value"), list) else spec.get("Value", "")).strip().lower()
+                    if val in ("hombre", "masculino", "male", "m", "h"):
+                        gender = "Hombre"
+                    elif val in ("mujer", "femenino", "female", "f"):
+                        gender = "Mujer"
+                    elif val in ("unisex", "niño", "niña", "infantil"):
+                        gender = val.title()
+                    break
+    except Exception:
+        pass
+
+    _product_cache[product_id] = gender
+    return gender
 
 
 def parse_orders(raw_orders, enrich_sample=150):
     """
-    GMV = value / 100 (valor pagado por el cliente en pesos).
-    Filtra además que la fecha de creación esté en hora Colombia
-    dentro del rango solicitado (para descartar órdenes UTC que
-    se cuelan por el desfase horario).
-
-    ADICIONADO (sin cambiar lógica existente):
-      - Extrae campo 'gender' → 'Hombre' / 'Mujer' / None
-      - Extrae campo 'city'   → nombre de ciudad o None
+    GMV = value / 100.
+    Extrae ciudad de envío del pedido.
+    Extrae género e imagen del catálogo de producto (por SKU).
     """
     rows    = []
     total_n = len(raw_orders)
@@ -235,7 +259,7 @@ def parse_orders(raw_orders, enrich_sample=150):
             if not mp_name:
                 continue
 
-            # Enriquecer con detalle para obtener items completos
+            # Enriquecer con detalle
             detail = None
             if idx < enrich_sample:
                 detail = fetch_order_detail(order_id)
@@ -243,10 +267,10 @@ def parse_orders(raw_orders, enrich_sample=150):
                     o = detail
                 time.sleep(0.12)
 
-            # ── GMV = valor pagado por el cliente ─────────────────────────
+            # ── GMV ───────────────────────────────────────────────────────
             gmv_val = float(o.get("value", 0) or o.get("totalValue", 0) or 0) / 100
 
-            # ── Descuentos y envío (informativos) ─────────────────────────
+            # ── Descuentos y envío ────────────────────────────────────────
             discount_val = 0.0
             shipping_val = 0.0
             for t in (o.get("totals") or []):
@@ -268,18 +292,24 @@ def parse_orders(raw_orders, enrich_sample=150):
             item_rows = []
             for i in items:
                 if isinstance(i, dict):
-                    qty   = int(i.get("quantity", 0) or 0)
-                    price = float(i.get("sellingPrice", 0) or i.get("price", 0) or 0) / 100
-                    units += qty
-                    sku_ids.append(str(i.get("id", "")))
+                    qty      = int(i.get("quantity", 0) or 0)
+                    price    = float(i.get("sellingPrice", 0) or i.get("price", 0) or 0) / 100
+                    sku_id_i = str(i.get("id", ""))
+                    units   += qty
+                    sku_ids.append(sku_id_i)
+
+                    # Imagen desde imageUrl del item (disponible en detalle)
+                    img_item = str(i.get("imageUrl", "") or "").strip()
+
                     item_rows.append({
                         "order_id":    order_id,
                         "marketplace": mp_name,
-                        "sku_id":      str(i.get("id", "")),
+                        "sku_id":      sku_id_i,
                         "nombre":      str(i.get("name", "")),
                         "cantidad":    qty,
                         "precio_unit": price,
                         "valor_total": price * qty,
+                        "image_url":   img_item if img_item else None,
                     })
 
             # ── Fecha en hora Colombia ─────────────────────────────────────
@@ -294,17 +324,22 @@ def parse_orders(raw_orders, enrich_sample=150):
             raw_status   = str(o.get("status", ""))
             status_label = STATUS_LABEL.get(raw_status, raw_status)
 
-            # ── NUEVO: género y ciudad ─────────────────────────────────────
-            # Usamos `detail` si se enriqueció, sino el objeto `o` actual
-            source_for_extras = detail if detail else o
-            gender = _extract_gender(source_for_extras)
-            city   = _extract_city(source_for_extras)
+            # ── Ciudad: de la dirección de envío del pedido ───────────────
+            source = detail if detail else o
+            city   = _extract_city(source)
+
+            # ── Género: del catálogo del producto (primer SKU del pedido) ─
+            # Se consulta solo para órdenes enriquecidas (tienen SKU ID real)
+            gender = None
+            if sku_ids:
+                cat_info = fetch_sku_catalog_info(sku_ids[0])
+                gender   = cat_info.get("gender")
 
             rows.append({
                 "order_id":    order_id,
                 "marketplace": mp_name,
                 "created_at":  creation_raw,
-                "fecha":       fecha_col,       # fecha en hora Colombia
+                "fecha":       fecha_col,
                 "status":      status_label,
                 "status_raw":  raw_status,
                 "gmv":         gmv_val,
@@ -314,9 +349,8 @@ def parse_orders(raw_orders, enrich_sample=150):
                 "units":       units,
                 "sku_ids":     sku_ids,
                 "items":       item_rows,
-                # ── campos nuevos ──────────────────────────────────────────
-                "gender":      gender,   # 'Hombre' | 'Mujer' | None
-                "city":        city,     # str | None
+                "gender":      gender,
+                "city":        city,
             })
 
         except Exception:
