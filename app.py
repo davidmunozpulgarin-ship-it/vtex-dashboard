@@ -5,7 +5,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import date, timedelta
-from vtex_api import fetch_orders, parse_orders, MP_SUFFIX, fetch_inventory, STATUS_LABEL
+from vtex_api import fetch_orders, parse_orders, MP_SUFFIX, fetch_inventory, STATUS_LABEL, fetch_sku_catalog_info
 
 st.set_page_config(
     page_title="Control Comercial VTEX",
@@ -49,6 +49,21 @@ section[data-testid="stSidebar"] input {
 [data-testid="stMetricLabel"] { color: #8b90a7 !important; font-size: 11px !important; text-transform: uppercase; }
 h1,h2,h3,h4 { color: #e8eaf2 !important; }
 div[data-testid="stPlotlyChart"] { border-radius: 12px; overflow: hidden; }
+.product-card {
+    background: #171b26;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 12px;
+    text-align: center;
+    height: 100%;
+}
+.product-card img { border-radius: 8px; width: 100%; max-height: 140px; object-fit: contain; }
+.product-name { color: #e8eaf2; font-size: 12px; font-weight: 600; margin: 8px 0 4px; line-height: 1.3; }
+.product-stat { color: #8b90a7; font-size: 11px; }
+.product-gmv  { color: #22c77a; font-size: 13px; font-weight: 700; }
+.stock-ok     { color: #22c77a; }
+.stock-low    { color: #f5a524; }
+.stock-zero   { color: #FF3560; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -60,7 +75,6 @@ MESES_ES = {
     7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
 }
 
-# ── PRESUPUESTOS: persistencia simple en archivo JSON local ─────────────────
 PRESUPUESTOS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presupuestos.json")
 
 
@@ -107,19 +121,125 @@ def shift_year(d: date) -> date:
         return d.replace(month=2, day=28, year=d.year - 1)
 
 
-# ── NUEVO: sección de detalle por marketplace ─────────────────────────────────
+# ── Top Productos con foto, unidades, monto y stock ──────────────────────────
+def render_top_productos(df_filtrado: pd.DataFrame):
+    """
+    Muestra los top 10 productos del marketplace seleccionado con:
+    - Foto del producto (imageUrl del item en la orden)
+    - Unidades vendidas
+    - Monto total de ventas
+    - Stock disponible (consultado en tiempo real al hacer clic)
+    """
+    st.markdown("### 🏆 Top Productos")
+
+    item_rows = []
+    for _, row in df_filtrado.iterrows():
+        if isinstance(row.get("items"), list):
+            for it in row["items"]:
+                if isinstance(it, dict):
+                    item_rows.append(it)
+
+    if not item_rows:
+        st.info("No se encontró detalle de productos para el período seleccionado.")
+        return
+
+    df_items = pd.DataFrame(item_rows)
+
+    # Asegurar columna image_url
+    if "image_url" not in df_items.columns:
+        df_items["image_url"] = None
+
+    # Agrupar por SKU + nombre: unidades y valor
+    top_prod = (
+        df_items.groupby(["sku_id", "nombre"])
+        .agg(
+            Unidades=("cantidad", "sum"),
+            GMV=("valor_total", "sum"),
+            # Tomar primera imagen disponible por SKU
+            image_url=("image_url", lambda x: next((v for v in x if v), None)),
+        )
+        .reset_index()
+        .sort_values("GMV", ascending=False)
+        .head(10)
+    )
+
+    # Consultar stock con botón
+    consultar_stock = st.button("🔍 Cargar stock de top productos", type="secondary")
+    stock_map = {}
+    if consultar_stock:
+        with st.spinner("Consultando inventario..."):
+            for sku in top_prod["sku_id"].tolist():
+                inv = fetch_inventory(sku)
+                stock_map[sku] = inv.get("available", -1)
+
+    # Mostrar en grillas de 5 columnas
+    cols_per_row = 5
+    for row_start in range(0, len(top_prod), cols_per_row):
+        chunk = top_prod.iloc[row_start: row_start + cols_per_row]
+        cols  = st.columns(cols_per_row)
+        for col_idx, (_, prod) in enumerate(chunk.iterrows()):
+            with cols[col_idx]:
+                # Imagen
+                img_url = prod.get("image_url")
+                if img_url:
+                    st.image(img_url, use_container_width=True)
+                else:
+                    st.markdown(
+                        "<div style='height:120px;background:#232738;border-radius:8px;"
+                        "display:flex;align-items:center;justify-content:center;"
+                        "color:#555a72;font-size:28px'>📦</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                nombre_corto = prod["nombre"][:55] + "…" if len(prod["nombre"]) > 55 else prod["nombre"]
+                st.markdown(f"**{nombre_corto}**")
+                st.caption(f"SKU: {prod['sku_id']}")
+
+                # Métricas
+                m1, m2 = st.columns(2)
+                m1.metric("Unidades", f"{int(prod['Unidades']):,}")
+                m2.metric("Ventas", f"${prod['GMV']:,.0f}")
+
+                # Stock
+                if stock_map:
+                    stk = stock_map.get(prod["sku_id"], -1)
+                    if stk < 0:
+                        st.caption("Stock: —")
+                    elif stk == 0:
+                        st.markdown("<span class='stock-zero'>🔴 Sin stock</span>", unsafe_allow_html=True)
+                    elif stk < 10:
+                        st.markdown(f"<span class='stock-low'>🟡 Stock: {stk}</span>", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"<span class='stock-ok'>🟢 Stock: {stk}</span>", unsafe_allow_html=True)
+
+    # Tabla resumen
+    with st.expander("📋 Tabla completa de productos"):
+        tabla_p = top_prod.copy()
+        tabla_p["GMV"]      = tabla_p["GMV"].apply(lambda v: f"${v:,.0f}")
+        tabla_p["Unidades"] = tabla_p["Unidades"].apply(lambda v: f"{int(v):,}")
+        if stock_map:
+            tabla_p["Stock"] = tabla_p["sku_id"].map(
+                lambda s: str(stock_map.get(s, "—"))
+            )
+        st.dataframe(
+            tabla_p[["sku_id","nombre","Unidades","GMV"] + (["Stock"] if stock_map else [])]
+            .rename(columns={"sku_id": "SKU", "nombre": "Producto"}),
+            use_container_width=True, hide_index=True,
+        )
+
+
+# ── Detalle exclusivo por marketplace ────────────────────────────────────────
 def render_marketplace_detail(df_mp: pd.DataFrame, mp_name: str):
     """
-    Renderiza la sección de detalle exclusivo cuando se selecciona
-    un marketplace específico. Muestra ventas por género y ciudades
-    de mayor participación.
-    No toca ningún código existente; se llama justo antes del header
-    cuando mp_sel != 'Todos'.
+    Sección de detalle que aparece SOLO cuando se selecciona un marketplace
+    específico. Muestra:
+      - Ventas por género (del catálogo del producto)
+      - Ciudades de mayor participación (de la dirección de envío del pedido)
     """
     st.markdown(f"### 🔍 Detalle Exclusivo — {mp_name}")
     st.caption("Información detallada únicamente de este canal de venta")
 
-    # Agregar columnas si no existen (cache viejo sin estos campos)
+    # Columnas defensivas si el cache aún no tiene estos campos
     if "gender" not in df_mp.columns:
         df_mp = df_mp.copy()
         df_mp["gender"] = None
@@ -132,12 +252,14 @@ def render_marketplace_detail(df_mp: pd.DataFrame, mp_name: str):
     # ── Ventas por Género ─────────────────────────────────────────────────────
     with col_g:
         st.markdown("#### 👤 Ventas por Género")
+        st.caption("Fuente: especificación de género del catálogo de producto")
         df_gender = df_mp[df_mp["gender"].notna()].copy()
 
         if df_gender.empty:
             st.info(
-                "No se encontró información de género en las órdenes enriquecidas del período. "
-                "El campo está disponible solo en las primeras 150 órdenes procesadas con detalle completo."
+                "No se encontró la especificación de género en el catálogo para los "
+                "productos del período. Verifica que exista el campo 'Género' en las "
+                "especificaciones del producto en VTEX Catalog."
             )
         else:
             gen_agg = (
@@ -149,21 +271,20 @@ def render_marketplace_detail(df_mp: pd.DataFrame, mp_name: str):
             gen_agg["% Pedidos"] = (gen_agg["Pedidos"] / gen_agg["Pedidos"].sum() * 100).round(1)
             gen_agg["% GMV"]     = (gen_agg["GMV"]     / gen_agg["GMV"].sum()     * 100).round(1)
 
-            # KPIs rápidos
             for _, r in gen_agg.iterrows():
-                emoji = "👨" if r["gender"] == "Hombre" else "👩"
+                emojis = {"Hombre": "👨", "Mujer": "👩"}
+                emoji  = emojis.get(r["gender"], "🧍")
                 st.metric(
                     f"{emoji} {r['gender']}",
                     f"${r['GMV']:,.0f}",
                     f"{r['% GMV']:.1f}% del GMV · {r['Pedidos']:,} pedidos ({r['% Pedidos']:.1f}%)",
                 )
 
-            # Gráfico donut
             fig_gen = px.pie(
                 gen_agg, values="GMV", names="gender",
                 hole=0.55,
-                color_discrete_sequence=["#4f87ff", "#FF3560"],
-                title="GMV por Género",
+                color_discrete_sequence=["#4f87ff", "#FF3560", "#22c77a", "#f5a524"],
+                title="GMV por Género (catálogo)",
             )
             fig_gen.update_layout(
                 paper_bgcolor="#171b26", font_color="#8b90a7",
@@ -173,23 +294,23 @@ def render_marketplace_detail(df_mp: pd.DataFrame, mp_name: str):
             )
             st.plotly_chart(fig_gen, use_container_width=True)
 
-            # Tabla
             tabla_gen = gen_agg.copy()
             tabla_gen["GMV"] = tabla_gen["GMV"].apply(lambda v: f"${v:,.0f}")
             st.dataframe(
-                tabla_gen.rename(columns={"gender": "Género", "% Pedidos": "% Pedidos", "% GMV": "% GMV"}),
+                tabla_gen.rename(columns={"gender": "Género"}),
                 use_container_width=True, hide_index=True,
             )
 
     # ── Ciudades de mayor participación ───────────────────────────────────────
     with col_c:
         st.markdown("#### 🏙️ Ciudades de Mayor Participación")
-        df_city = df_mp[df_mp["city"].notna() & (df_mp["city"] != "")].copy()
+        st.caption("Fuente: ciudad de envío del pedido (shippingData)")
+        df_city = df_mp[df_mp["city"].notna() & (df_mp["city"].astype(str).str.strip() != "")].copy()
 
         if df_city.empty:
             st.info(
-                "No se encontró información de ciudad en las órdenes del período. "
-                "Está disponible en las primeras 150 órdenes procesadas con detalle completo."
+                "No se encontró ciudad de envío en las órdenes del período. "
+                "Disponible solo en las órdenes procesadas con detalle completo (primeras 150)."
             )
         else:
             city_agg = (
@@ -201,27 +322,22 @@ def render_marketplace_detail(df_mp: pd.DataFrame, mp_name: str):
             city_agg["% GMV"] = (city_agg["GMV"] / city_agg["GMV"].sum() * 100).round(1)
 
             top_cities = city_agg.head(10)
-
-            # Top 3 highlights
-            top3 = top_cities.head(3)
             medal = ["🥇", "🥈", "🥉"]
-            for i, (_, r) in enumerate(top3.iterrows()):
+            for i, (_, r) in enumerate(top_cities.head(3).iterrows()):
                 st.metric(
                     f"{medal[i]} {r['city']}",
                     f"${r['GMV']:,.0f}",
                     f"{r['% GMV']:.1f}% del GMV · {r['Pedidos']:,} pedidos",
                 )
 
-            # Gráfico horizontal
-            top_cities_plot = top_cities.sort_values("GMV", ascending=True)
             fig_city = px.bar(
-                top_cities_plot,
+                top_cities.sort_values("GMV", ascending=True),
                 x="GMV", y="city", orientation="h",
                 color="GMV",
                 color_continuous_scale=["#232738", "#4f87ff"],
-                title=f"Top {len(top_cities)} Ciudades — GMV",
+                title=f"Top {len(top_cities)} Ciudades — GMV (envío)",
                 labels={"GMV": "GMV ($)", "city": ""},
-                text=top_cities_plot["GMV"].apply(
+                text=top_cities.sort_values("GMV", ascending=True)["GMV"].apply(
                     lambda v: f"${v/1e6:.1f}M" if v >= 1e6 else f"${v/1e3:.0f}K"
                 ),
             )
@@ -234,7 +350,6 @@ def render_marketplace_detail(df_mp: pd.DataFrame, mp_name: str):
             )
             st.plotly_chart(fig_city, use_container_width=True)
 
-            # Tabla completa
             with st.expander("📋 Ver todas las ciudades"):
                 tabla_city = city_agg.copy()
                 tabla_city["GMV"] = tabla_city["GMV"].apply(lambda v: f"${v:,.0f}")
@@ -363,7 +478,6 @@ fecha_desde_str = fecha_desde.strftime("%Y-%m-%d")
 fecha_hasta_str = fecha_hasta.strftime("%Y-%m-%d")
 cache_key       = f"{fecha_desde_str}_{fecha_hasta_str}"
 
-# Período equivalente del año anterior
 fecha_desde_ly     = shift_year(fecha_desde)
 fecha_hasta_ly     = shift_year(fecha_hasta)
 fecha_desde_ly_str = fecha_desde_ly.strftime("%Y-%m-%d")
@@ -380,19 +494,17 @@ def cargar_datos(key, f_desde, f_hasta):
         return pd.DataFrame()
     df = pd.DataFrame(parsed)
 
-    # "fecha" ya viene en hora Colombia desde vtex_api.py
     if "fecha" not in df.columns or df["fecha"].isna().all():
-        from datetime import timezone, timedelta as td
-        COL_TZ = timezone(td(hours=-5))
+        from datetime import timezone as tz, timedelta as td
+        COL_TZ_L = tz(td(hours=-5))
         df["created_at_dt"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
-        df["fecha"] = df["created_at_dt"].dt.tz_convert(COL_TZ).dt.date
+        df["fecha"] = df["created_at_dt"].dt.tz_convert(COL_TZ_L).dt.date
 
-    # Filtrar solo órdenes cuya fecha Colombia esté en el rango pedido
     fecha_desde_d = date.fromisoformat(f_desde)
     fecha_hasta_d = date.fromisoformat(f_hasta)
     df = df[df["fecha"].between(fecha_desde_d, fecha_hasta_d)]
-
     return df
+
 
 if actualizar:
     st.cache_data.clear()
@@ -409,7 +521,6 @@ if df_full.empty:
     )
     st.stop()
 
-# Datos del mismo período, año anterior (para comparativo)
 df_full_ly = cargar_datos(cache_key_ly, fecha_desde_ly_str, fecha_hasta_ly_str)
 
 # ── FILTROS ───────────────────────────────────────────────────────────────────
@@ -422,7 +533,6 @@ if df.empty:
     st.info("Sin órdenes para los filtros seleccionados.")
     st.stop()
 
-# Mismo filtro de estado/marketplace aplicado al período del año anterior
 if not df_full_ly.empty:
     df_ly = df_full_ly.copy()
     if mp_sel != "Todos":
@@ -430,13 +540,18 @@ if not df_full_ly.empty:
     if estados_sel:
         df_ly = df_ly[df_ly["status"].isin(estados_sel)]
 else:
-    df_ly = df_full_ly  # ya está vacío
+    df_ly = df_full_ly
 
-# Versión del año anterior filtrada solo por estado (para el desglose por
-# marketplace, que siempre debe mostrar todos los canales)
+# Para el comparativo de barras: cuando se ve un MP específico usamos solo ese;
+# cuando se ven todos, mostramos todos los canales.
 df_estado_actual = df_full[df_full["status"].isin(estados_sel)] if estados_sel else df_full
+if mp_sel != "Todos":
+    df_estado_actual = df_estado_actual[df_estado_actual["marketplace"] == mp_sel]
+
 if not df_full_ly.empty:
     df_estado_ly = df_full_ly[df_full_ly["status"].isin(estados_sel)] if estados_sel else df_full_ly
+    if mp_sel != "Todos":
+        df_estado_ly = df_estado_ly[df_estado_ly["marketplace"] == mp_sel]
 else:
     df_estado_ly = df_full_ly
 
@@ -451,7 +566,7 @@ st.caption(
 )
 st.divider()
 
-# ── NUEVO: Detalle exclusivo cuando se selecciona un marketplace específico ───
+# ── DETALLE EXCLUSIVO (solo cuando se elige un marketplace específico) ────────
 if mp_sel != "Todos":
     render_marketplace_detail(df, mp_sel)
 
@@ -508,7 +623,7 @@ if presupuesto_rango <= 0:
         "Ábrelo en el panel lateral, en **'Gestionar presupuestos por mes'**."
     )
 
-# Desglose por marketplace: año actual vs año anterior (siempre todos los canales)
+# Gráfico comparativo: año actual vs año anterior (filtrado por MP si aplica)
 comp_actual = df_estado_actual.groupby("marketplace")["gmv"].sum().reset_index().rename(columns={"gmv": "GMV_Actual"})
 if not df_estado_ly.empty:
     comp_ly = df_estado_ly.groupby("marketplace")["gmv"].sum().reset_index().rename(columns={"gmv": "GMV_LY"})
@@ -533,7 +648,7 @@ chart_data["Período"] = chart_data["Período"].map({
 
 fig_comp = px.bar(
     chart_data, x="marketplace", y="GMV", color="Período", barmode="group",
-    title="GMV por Marketplace — Año actual vs Año anterior",
+    title=f"GMV — {titulo} · Año actual vs Año anterior",
     color_discrete_sequence=["#FF3560", "#4f87ff"],
     labels={"GMV": "GMV ($)", "marketplace": ""},
 )
@@ -661,38 +776,6 @@ st.dataframe(
 
 st.divider()
 
-# ── TENDENCIA DIARIA ──────────────────────────────────────────────────────────
-st.markdown("### 📈 Tendencia Diaria")
-tend = df.groupby("fecha").agg(
-    Pedidos=("order_id", "count"),
-    GMV=("gmv", "sum"),
-).reset_index()
-tend["fecha"] = pd.to_datetime(tend["fecha"])
-
-fig_tend = go.Figure()
-fig_tend.add_trace(go.Scatter(
-    x=tend["fecha"], y=tend["GMV"], mode="lines", name="GMV",
-    line=dict(color="#FF3560", width=2),
-    fill="tozeroy", fillcolor="rgba(255,53,96,0.08)",
-))
-fig_tend.add_trace(go.Scatter(
-    x=tend["fecha"], y=tend["Pedidos"], mode="lines", name="Pedidos",
-    line=dict(color="#4f87ff", width=2), yaxis="y2",
-))
-fig_tend.update_layout(
-    title=f"GMV y Pedidos diarios — {titulo}",
-    paper_bgcolor="#171b26", plot_bgcolor="#171b26",
-    font_color="#8b90a7", title_font_color="#e8eaf2",
-    legend=dict(bgcolor="#171b26", font=dict(color="#8b90a7")),
-    xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="GMV ($)"),
-    yaxis2=dict(overlaying="y", side="right", title="Pedidos", showgrid=False),
-    height=320,
-)
-st.plotly_chart(fig_tend, use_container_width=True)
-
-st.divider()
-
 # ── INVENTARIO ────────────────────────────────────────────────────────────────
 st.markdown("### 📦 Inventario")
 all_skus    = []
@@ -724,64 +807,8 @@ else:
 
 st.divider()
 
-# ── TOP PRODUCTOS ─────────────────────────────────────────────────────────────
-st.markdown("### 🏆 Top Productos")
-item_rows = []
-for _, row in df.iterrows():
-    if isinstance(row.get("items"), list):
-        for it in row["items"]:
-            if isinstance(it, dict):
-                item_rows.append(it)
-
-if item_rows:
-    df_items = pd.DataFrame(item_rows)
-    col1, col2 = st.columns(2)
-    with col1:
-        top_u = (
-            df_items.groupby("nombre")["cantidad"]
-            .sum().reset_index()
-            .sort_values("cantidad", ascending=True).tail(10)
-        )
-        fig_tu = px.bar(
-            top_u, x="cantidad", y="nombre", orientation="h",
-            title="Top 10 — Unidades vendidas",
-            color_discrete_sequence=["#4f87ff"],
-            labels={"cantidad": "Unidades", "nombre": ""},
-            text="cantidad",
-        )
-        fig_tu.update_layout(**PLOT_BASE, height=380)
-        st.plotly_chart(fig_tu, use_container_width=True)
-
-    with col2:
-        top_v = (
-            df_items.groupby("nombre")["valor_total"]
-            .sum().reset_index()
-            .sort_values("valor_total", ascending=True).tail(10)
-        )
-        fig_tv = px.bar(
-            top_v, x="valor_total", y="nombre", orientation="h",
-            title="Top 10 — Valor ($)",
-            color_discrete_sequence=["#22c77a"],
-            labels={"valor_total": "Valor ($)", "nombre": ""},
-            text=top_v["valor_total"].apply(lambda v: f"${v:,.0f}"),
-        )
-        fig_tv.update_layout(**PLOT_BASE, height=380)
-        st.plotly_chart(fig_tv, use_container_width=True)
-
-    with st.expander("📋 Tabla completa de productos"):
-        tabla_p = (
-            df_items.groupby(["sku_id","nombre"]).agg(
-                Unidades=("cantidad", "sum"),
-                Valor=("valor_total", "sum"),
-            ).reset_index().sort_values("Valor", ascending=False)
-        )
-        tabla_p["Valor"] = tabla_p["Valor"].apply(lambda v: f"${v:,.0f}")
-        st.dataframe(
-            tabla_p.rename(columns={"sku_id": "SKU", "nombre": "Producto"}),
-            use_container_width=True, hide_index=True,
-        )
-else:
-    st.info("No se encontró detalle de productos para el período seleccionado.")
+# ── TOP PRODUCTOS (con foto, unidades, monto y stock) ─────────────────────────
+render_top_productos(df)
 
 st.divider()
 
